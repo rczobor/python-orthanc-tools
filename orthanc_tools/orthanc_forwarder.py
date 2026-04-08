@@ -163,7 +163,7 @@ class OrthancForwarder:
                 self._resources_to_process.task_done()  # tell the queue the item has been processed
 
             except exceptions.ConnectionError as ex:
-                logger.info(f"Connection error while handling {resource.type} {resource.resource_id}: {ex.msg}")
+                logger.info(f"Connection error while handling {resource.type} {resource.resource_id}: {str(ex)}")
             except Exception as ex:
                 logger.exception(f"Error while handling all {resource.type} {resource.resource_id}: {str(ex)}")
 
@@ -284,7 +284,7 @@ class OrthancForwarder:
 
                 logger.info(f"{instances_set} Processing ... done")
             except exceptions.OrthancApiException as ex:
-                logger.error(f"{instances_set} Error while processing: {ex.msg}")
+                logger.error(f"{instances_set} Error while processing: {str(ex)}")
             except Exception as ex:
                 logger.error(f"{instances_set} Error while processing: {str(ex)}", exc_info=True)
                 return False
@@ -485,6 +485,7 @@ if __name__ == '__main__':
         help='Destination alias with optional mode override (alias[:mode]). Repeat flag to add multiple destinations.'
     )
     add_parser_argument_w_alias(parser, '--worker_threads_count', type=int, default=1, help='Number of worker threads')
+    add_parser_argument_w_alias(parser, '--polling_interval', type=int, default=1, help='Polling interval (in seconds)')
     add_parser_argument_w_alias(parser, '--trigger', type=str, default=None, help='NewInstance or StableStudy')
     add_parser_argument_w_alias(parser, '--mode', type=str, default='dicom', help=f'Default forwarder mode. One of: {", ".join(sorted(valid_modes))}')
 
@@ -510,6 +511,7 @@ if __name__ == '__main__':
     if not raw_destinations:
         raise ValueError("At least one destination must be provided via --destination, DESTINATION, or DESTINATIONS.")
     worker_threads_count = int(os.environ.get("WORKER_THREADS_COUNT", str(args.worker_threads_count)))
+    polling_interval_in_seconds = int(os.environ.get("POLLING_INTERVAL", str(args.polling_interval)))
     trigger = os.environ.get("TRIGGER", args.trigger)
     mode_str = os.environ.get("MODE", args.mode)
 
@@ -560,7 +562,8 @@ if __name__ == '__main__':
         source=api_client,
         destinations=forwarder_destinations,
         trigger=trigger,
-        worker_threads_count=worker_threads_count
+        worker_threads_count=worker_threads_count,
+        polling_interval_in_seconds=polling_interval_in_seconds
     )
 
     forwarder.execute()

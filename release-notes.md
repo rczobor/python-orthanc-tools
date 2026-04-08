@@ -1,8 +1,35 @@
+Pending changes
+===============
+- `OrthancCloner` now starts in `Default` mode if not specified.
 
+v 0.18.1
+=========
+- fix in `DicomWorklistBuilder` and in `hl7_worklist_server_for_orthanc`
+
+v 0.18.0
+=========
+- added support for the new Worklists plugin in the `DicomWorklistBuilder`
+
+v 0.17.17
+=========
+- added a way to the `DicomWorklistBuilder` to generate deterministic UIDs
+
+v 0.17.15
+=========
 - fix some incorrect exception handling
 
+v 0.17.14
+=========
+- added `--polling_interval` CLI option and `POLLING_INTERVAL` env var to the `OrthancForwarder`
+- upgraded api-client from `0.18.8` to `0.22.2`
+
+v 0.17.11
+=========
+- fix some incorrect exception handling
+- stop the `Hl7FolderMonitor` in case of error
+
 v 0.17.10
-========
+=========
 -  fixed the tests
 -  made worklists parser more tolerant to missing info
 
