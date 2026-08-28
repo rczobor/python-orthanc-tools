@@ -1,3 +1,4 @@
+import csv
 import os
 import tempfile
 import unittest
@@ -90,6 +91,27 @@ class TestOrthancFilesCheckerFailures(unittest.TestCase):
                     report.read(),
                 )
 
+    def test_report_escapes_dicom_values(self):
+        study = SimpleNamespace(
+            patient_main_dicom_tags={
+                "PatientID": "PATIENT",
+                "PatientName": 'Family, "Given"',
+            },
+            main_dicom_tags={
+                "StudyDate": "20260828",
+                "StudyDescription": "CT, contrast",
+                "StudyInstanceUID": "1.2.3",
+            },
+        )
 
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = os.path.join(temp_dir, "missing.csv")
+            OrthancFilesChecker(mock.MagicMock(), report_path).add_study_to_list(study)
+
+            with open(report_path, newline="") as report:
+                self.assertEqual(
+                    [["PATIENT", 'Family, "Given"', "20260828", "CT, contrast", "1.2.3"]],
+                    list(csv.reader(report)),
+                )
 if __name__ == "__main__":
     unittest.main()

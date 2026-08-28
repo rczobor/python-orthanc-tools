@@ -15,14 +15,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_TRANSFER_TIMEOUT = 300
 
 
-def _should_fallback_without_timeout(error: TypeError) -> bool:
-    error_message = str(error)
-    return "timeout" in error_message and (
-        "unexpected keyword argument" in error_message
-        or "got an unexpected keyword argument" in error_message
-    )
-
-
 class ClonerMode(StrEnum):
 
     DEFAULT = 'Default'             # download instance and reupload them in new orthanc
@@ -92,20 +84,10 @@ class OrthancCloner(OrthancMonitor):
 
     def _download_with_timeout(self, api_client: OrthancApiClient, instance_id: str):
         path = f"instances/{instance_id}/file"
-        try:
-            return api_client.get_binary(path, timeout=self._transfer_timeout)
-        except TypeError as ex:
-            if not _should_fallback_without_timeout(ex):
-                raise
-            return api_client.get_binary(path)
+        return api_client.get_binary(path, timeout=self._transfer_timeout)
 
     def _upload_with_timeout(self, dicom: bytes):
-        try:
-            response = self._destination.post('instances', data=dicom, timeout=self._transfer_timeout)
-        except TypeError as ex:
-            if not _should_fallback_without_timeout(ex):
-                raise
-            response = self._destination.post('instances', data=dicom)
+        response = self._destination.post('instances', data=dicom, timeout=self._transfer_timeout)
 
         response_json = response.json()
         if isinstance(response_json, list):

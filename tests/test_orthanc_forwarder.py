@@ -473,23 +473,20 @@ class TestOrthancClonerTimeouts(unittest.TestCase):
 
         api_client.get_binary.assert_called_once_with("instances/instance-1/file", timeout=0.01)
 
-    def test_download_falls_back_when_client_does_not_accept_timeout(self):
+    def test_download_does_not_retry_without_timeout(self):
         cloner = object.__new__(OrthancCloner)
         cloner._transfer_timeout = 0.01
         api_client = mock.MagicMock()
-        api_client.get_binary.side_effect = [
-            TypeError("get_binary() got an unexpected keyword argument 'timeout'"),
-            b"dicom",
-        ]
+        api_client.get_binary.side_effect = TypeError(
+            "get_binary() got an unexpected keyword argument 'timeout'"
+        )
 
-        self.assertEqual(b"dicom", cloner._download_with_timeout(api_client, "instance-1"))
+        with self.assertRaises(TypeError):
+            cloner._download_with_timeout(api_client, "instance-1")
 
-        self.assertEqual(
-            [
-                mock.call("instances/instance-1/file", timeout=0.01),
-                mock.call("instances/instance-1/file"),
-            ],
-            api_client.get_binary.call_args_list
+        api_client.get_binary.assert_called_once_with(
+            "instances/instance-1/file",
+            timeout=0.01,
         )
 
     def test_upload_timeout_is_enforced_when_client_accepts_timeout(self):
@@ -503,23 +500,19 @@ class TestOrthancClonerTimeouts(unittest.TestCase):
 
         cloner._destination.post.assert_called_once_with('instances', data=b"dicom", timeout=0.01)
 
-    def test_upload_falls_back_when_client_does_not_accept_timeout(self):
+    def test_upload_does_not_retry_without_timeout(self):
         cloner = object.__new__(OrthancCloner)
         cloner._transfer_timeout = 0.01
         cloner._destination = mock.MagicMock()
-        response = mock.MagicMock()
-        response.json.return_value = {'ID': 'instance-1'}
-        cloner._destination.post.side_effect = [
-            TypeError("post() got an unexpected keyword argument 'timeout'"),
-            response,
-        ]
+        cloner._destination.post.side_effect = TypeError(
+            "post() got an unexpected keyword argument 'timeout'"
+        )
 
-        self.assertEqual(["instance-1"], cloner._upload_with_timeout(b"dicom"))
+        with self.assertRaises(TypeError):
+            cloner._upload_with_timeout(b"dicom")
 
-        self.assertEqual(
-            [
-                mock.call('instances', data=b"dicom", timeout=0.01),
-                mock.call('instances', data=b"dicom"),
-            ],
-            cloner._destination.post.call_args_list
+        cloner._destination.post.assert_called_once_with(
+            'instances',
+            data=b"dicom",
+            timeout=0.01,
         )

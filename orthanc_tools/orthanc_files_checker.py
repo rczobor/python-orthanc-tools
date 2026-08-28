@@ -84,8 +84,14 @@ class OrthancFilesChecker:
         StudyDescription = study.main_dicom_tags.get("StudyDescription")
         StudyInstanceUID = study.main_dicom_tags.get("StudyInstanceUID")
 
-        with open(self._missing_files_list_file_path, "a") as f:
-            f.write(f'{PatientID},{PatientName},{StudyDate},{StudyDescription},{StudyInstanceUID}\n')
+        with open(self._missing_files_list_file_path, "a", newline="") as f:
+            csv.writer(f).writerow([
+                PatientID,
+                PatientName,
+                StudyDate,
+                StudyDescription,
+                StudyInstanceUID,
+            ])
 
 
     def execute(self):
