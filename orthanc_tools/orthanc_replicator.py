@@ -178,13 +178,14 @@ class OrthancReplicator:
 
                 # initialize connection to rabbitmq
                 connection = pika.BlockingConnection(self._bounded_broker_params())
-                channel = connection.channel()
 
                 with self._state_lock:
                     if self._stop_requested:
                         connection.close()
                         return
                     self._connection = connection
+
+                channel = connection.channel()
 
                 # These steps should have been done in the lua, but they are idempotent
                 channel.exchange_declare(exchange="orthanc-exchange", exchange_type="direct", durable=True)

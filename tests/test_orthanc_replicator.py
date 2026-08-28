@@ -1,3 +1,4 @@
+import copy
 import time
 import subprocess
 from orthanc_api_client import OrthancApiClient, helpers
@@ -56,7 +57,12 @@ class TestOrthancReplicator(unittest.TestCase):
     @classmethod
     def rabbitmq_is_ready(cls):
         try:
-            connection = pika.BlockingConnection(cls.get_rabbitmq_connection_params())
+            params = copy.copy(cls.get_rabbitmq_connection_params())
+            params.connection_attempts = 1
+            params.socket_timeout = 5
+            params.stack_timeout = 5
+            params.blocked_connection_timeout = 5
+            connection = pika.BlockingConnection(params)
             connection.close()
             return True
         except pika.exceptions.AMQPError:

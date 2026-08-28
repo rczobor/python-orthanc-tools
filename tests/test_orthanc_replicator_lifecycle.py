@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pika
 
 from orthanc_tools import OrthancReplicator
+from tests import test_orthanc_replicator
 
 
 class FakeChannel:
@@ -39,8 +40,11 @@ class FakeConnection:
     def __init__(self, channel):
         self._channel = channel
         self.is_open = True
+        self.on_channel = None
 
     def channel(self):
+        if self.on_channel:
+            self.on_channel()
         return self._channel
 
     def add_callback_threadsafe(self, callback):
@@ -57,6 +61,18 @@ class AliveOrthanc:
 
 
 class TestOrthancReplicatorLifecycle(unittest.TestCase):
+    def test_readiness_probe_has_bounded_connection_parameters(self):
+        with patch(
+            "tests.test_orthanc_replicator.pika.BlockingConnection",
+            side_effect=pika.exceptions.AMQPConnectionError,
+        ) as connect:
+            self.assertFalse(test_orthanc_replicator.TestOrthancReplicator.rabbitmq_is_ready())
+
+        params = connect.call_args.args[0]
+        self.assertEqual(1, params.connection_attempts)
+        self.assertEqual(5, params.socket_timeout)
+        self.assertEqual(5, params.stack_timeout)
+
     def test_connection_setup_uses_bounded_parameters(self):
         broker_params = pika.ConnectionParameters(
             connection_attempts=3,
@@ -83,15 +99,20 @@ class TestOrthancReplicatorLifecycle(unittest.TestCase):
             AliveOrthanc(),
             pika.ConnectionParameters(),
         )
+        connection.on_channel = lambda: self.assertIs(
+            connection,
+            replicator._connection,
+        )
 
         with patch("orthanc_tools.orthanc_replicator.pika.BlockingConnection", return_value=connection):
             replicator.execute()
-            self.assertTrue(channel.consuming.wait(1))
             try:
+                self.assertTrue(channel.consuming.wait(1))
                 replicator.stop()
                 self.assertFalse(replicator._consuming_thread.is_alive())
             finally:
                 channel.stopped.set()
+                replicator._stop_requested = True
                 replicator._consuming_thread.join(1)
 
 
