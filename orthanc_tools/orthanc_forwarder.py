@@ -1,13 +1,14 @@
 import argparse
 import csv
 import datetime
+import hashlib
 import logging
 import time
 import os
 import re
 import threading
 import queue
-from collections import Counter, deque
+from collections import Counter
 from pathlib import Path
 from strenum import StrEnum
 from dataclasses import dataclass, field
@@ -18,7 +19,7 @@ from .orthanc_monitor import ChangeType
 
 logger = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL_SECONDS = 10
-TERMINAL_STATUS_CACHE_SIZE = 10000
+TERMINAL_METADATA_NAME = "4600"
 UNKNOWN_LOG_CONTEXT_VALUE = "unknown"
 REMOTE_AET_METADATA_NAMES = ("RemoteAET", "RemoteAet")
 
@@ -113,7 +114,6 @@ class ForwarderInstancesSetStatus:
     last_eligible_destinations: List[str] = field(default_factory=list)
     retry_count: int = field(init=False, default=0)
     next_retry: Optional[datetime.datetime] = None
-    terminal: bool = field(init=False, default=False)
     log_context: Optional[str] = None
 
 
@@ -189,7 +189,8 @@ class OrthancForwarder:
         self._on_instances_set_forwarded = on_instances_set_forwarded
         self._on_instances_set_forward_error = on_instances_set_forward_error
         self._status = {}
-        self._terminal_status_ids = deque()
+        terminal_configuration = repr(sorted(destination_retry_keys)).encode("utf-8")
+        self._terminal_configuration = hashlib.sha256(terminal_configuration).hexdigest()
         self._resources_to_process = queue.Queue(worker_threads_count + 1)
         self._worker_threads_count = worker_threads_count
         self._worker_threads = []
@@ -408,18 +409,30 @@ class OrthancForwarder:
         status.next_retry = next_retry
         status.retry_count = retry_count + 1
 
-    def _mark_as_terminal(self, instances_set: InstancesSet, status: ForwarderInstancesSetStatus):
-        logger.info(f"{instances_set} No eligible destinations matched; keeping source data")
-        status.next_retry = None
-        status.retry_count = 0
-        status.terminal = True
-        self._terminal_status_ids.append(instances_set.id)
+    def _resource_client(self):
+        if self._trigger == ChangeType.STABLE_STUDY:
+            return self._source.studies
+        if self._trigger == ChangeType.STABLE_SERIES:
+            return self._source.series
+        if self._trigger == ChangeType.NEW_INSTANCE:
+            return self._source.instances
+        raise NotImplementedError()
 
-        while len(self._terminal_status_ids) > TERMINAL_STATUS_CACHE_SIZE:
-            expired_id = self._terminal_status_ids.popleft()
-            expired_status = self._status.get(expired_id)
-            if expired_status is not None and expired_status.terminal:
-                del self._status[expired_id]
+    def _is_terminal(self, instances_set: InstancesSet):
+        return self._resource_client().get_string_metadata(
+            instances_set.id,
+            metadata_name=TERMINAL_METADATA_NAME,
+            default_value="",
+        ) == self._terminal_configuration
+
+    def _mark_as_terminal(self, instances_set: InstancesSet):
+        logger.info(f"{instances_set} No eligible destinations matched; keeping source data")
+        self._resource_client().set_string_metadata(
+            instances_set.id,
+            metadata_name=TERMINAL_METADATA_NAME,
+            content=self._terminal_configuration,
+        )
+        del self._status[instances_set.id]
 
     def forward(self, instances_set, already_sent_to_destinations: List[str]) -> Tuple[List[str], List[str]]:  # returns (sent destinations, eligible destinations)
         sent_to_destinations = list(already_sent_to_destinations)
@@ -512,12 +525,11 @@ class OrthancForwarder:
     def handle_instances_set(self, instances_set: InstancesSet):
 
         if instances_set.id not in self._status:
+            if self._is_terminal(instances_set):
+                logger.debug(f"{instances_set} Skipping permanently ineligible content")
+                return
             self._status[instances_set.id] = ForwarderInstancesSetStatus()
         status = self._status[instances_set.id]
-
-        if status.terminal:
-            logger.debug(f"{instances_set} Skipping permanently ineligible content")
-            return
 
         if status.next_retry:  # this is a retry !
             if datetime.datetime.now() < status.next_retry:
@@ -545,7 +557,7 @@ class OrthancForwarder:
         status.last_eligible_destinations = eligible_destinations
 
         if len(eligible_destinations) == 0:
-            self._mark_as_terminal(instances_set, status)
+            self._mark_as_terminal(instances_set)
             return
 
         if len(sent_to_destinations) == len(eligible_destinations):

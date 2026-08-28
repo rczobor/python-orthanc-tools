@@ -350,8 +350,16 @@ class TestOrthancForwarderFilteringBehavior(unittest.TestCase):
     def test_filtered_only_non_matching_study_runs_hooks_before_terminal_skip(self):
         instance_filter = mock.Mock(return_value=False)
         instance_processor = mock.Mock()
+        source = mock.MagicMock()
+        metadata = {}
+        source.studies.get_string_metadata.side_effect = (
+            lambda orthanc_id, metadata_name, default_value: metadata.get((orthanc_id, metadata_name), default_value)
+        )
+        source.studies.set_string_metadata.side_effect = (
+            lambda orthanc_id, metadata_name, content: metadata.__setitem__((orthanc_id, metadata_name), content)
+        )
         forwarder = OrthancForwarder(
-            source=mock.MagicMock(),
+            source=source,
             destinations=[
                 ForwarderDestination(
                     destination="ai",
@@ -371,12 +379,7 @@ class TestOrthancForwarderFilteringBehavior(unittest.TestCase):
                 forwarder.handle_instances_set(instances_set)
 
         self.assertFalse(instances_set.deleted)
-        self.assertTrue(forwarder._status[instances_set.id].processed)
-        self.assertEqual([], forwarder._status[instances_set.id].sent_to_destinations)
-        self.assertEqual([], forwarder._status[instances_set.id].last_eligible_destinations)
-        self.assertEqual(0, forwarder._status[instances_set.id].retry_count)
-        self.assertIsNone(forwarder._status[instances_set.id].next_retry)
-        self.assertTrue(forwarder._status[instances_set.id].terminal)
+        self.assertNotIn(instances_set.id, forwarder._status)
         self.assertEqual(1, instances_set.filter_calls)
         self.assertTrue(instances_set.filtered.deleted)
         self.assertEqual(1, instances_set.process_calls)
@@ -385,21 +388,33 @@ class TestOrthancForwarderFilteringBehavior(unittest.TestCase):
         get_study_description.assert_called_once_with(instances_set)
         forward_to_destination.assert_not_called()
 
-    def test_terminal_status_cache_is_bounded(self):
-        forwarder = OrthancForwarder(
-            source=mock.MagicMock(),
-            destinations=[],
+    def test_terminal_status_is_shared_by_new_forwarder_instances(self):
+        source = mock.MagicMock()
+        metadata = {}
+        source.studies.get_string_metadata.side_effect = (
+            lambda orthanc_id, metadata_name, default_value: metadata.get((orthanc_id, metadata_name), default_value)
+        )
+        source.studies.set_string_metadata.side_effect = (
+            lambda orthanc_id, metadata_name, content: metadata.__setitem__((orthanc_id, metadata_name), content)
         )
         first = FakeInstancesSet()
-        second = FakeInstancesSet()
-        second.id = "study-2"
+        processor = mock.Mock()
+        first_forwarder = OrthancForwarder(source=source, destinations=[], instance_processor=processor)
+        second_forwarder = OrthancForwarder(source=source, destinations=[], instance_processor=processor)
 
-        with mock.patch("orthanc_tools.orthanc_forwarder.TERMINAL_STATUS_CACHE_SIZE", 1):
-            forwarder.handle_instances_set(first)
-            forwarder.handle_instances_set(second)
+        first_forwarder.handle_instances_set(first)
+        second_forwarder.handle_instances_set(first)
 
-        self.assertNotIn(first.id, forwarder._status)
-        self.assertTrue(forwarder._status[second.id].terminal)
+        self.assertNotIn(first.id, first_forwarder._status)
+        self.assertNotIn(first.id, second_forwarder._status)
+        self.assertEqual(1, first.process_calls)
+        source.studies.set_string_metadata.assert_called_once()
+
+        changed_forwarder = OrthancForwarder(
+            source=source,
+            destinations=[ForwarderDestination(destination="orthanc-b", forwarder_mode=ForwarderMode.DICOM)],
+        )
+        self.assertFalse(changed_forwarder._is_terminal(first))
 
     def test_already_sent_study_is_deleted_when_remaining_filtered_destinations_do_not_match(self):
         forwarder = OrthancForwarder(
