@@ -141,6 +141,7 @@ class OrthancCleaner:
             reader = csv.reader(csv_file)
 
             for row in reader:
+                row += [""] * max(0, 4 - len(row))
                 labels_rules.append(LabelRule(row[0], int(row[1]), row[2], row[3]))
         return labels_rules
 

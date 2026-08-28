@@ -3,6 +3,14 @@
 # VCS / tooling
 .git
 .github
+.env
+.env.*
+*.env
+.idea/
+.vscode/
+.venv/
+venv/
+.cache/
 __pycache__/
 *.py[cod]
 .pytest_cache/

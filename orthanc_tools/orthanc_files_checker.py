@@ -20,10 +20,21 @@ import argparse
 import logging
 from typing import List
 import os
-from orthanc_api_client import OrthancApiClient, helpers
+from orthanc_api_client import OrthancApiClient, exceptions, helpers
 import csv
 
 logger = logging.getLogger(__name__)
+MISSING_STORAGE_ORTHANC_STATUS = 2006
+
+
+def is_missing_storage_file_error(error: exceptions.HttpError) -> bool:
+    if error.http_status_code != 500 or error.request_response is None:
+        return False
+
+    try:
+        return error.request_response.json().get("OrthancStatus") == MISSING_STORAGE_ORTHANC_STATUS
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 class OrthancFilesChecker:
 
@@ -54,7 +65,9 @@ class OrthancFilesChecker:
             for instance_id in instances_ids:
                 try:
                     self._api_client.instances.get_file(instance_id)
-                except:
+                except exceptions.HttpError as ex:
+                    if not is_missing_storage_file_error(ex):
+                        raise
                     study = self._api_client.studies.get(orthanc_id=study_id)
                     self.add_study_to_list(study)
                     break
