@@ -1,4 +1,5 @@
 import argparse
+import copy
 import threading
 import time
 
@@ -9,6 +10,7 @@ import os
 from orthanc_api_client import OrthancApiClient, ResourceType, JobStatus, ResourceNotFound
 
 logger = logging.getLogger(__name__)
+BROKER_SETUP_TIMEOUT = 5
 
 class OrthancReplicator:
     '''
@@ -69,10 +71,26 @@ class OrthancReplicator:
         self._broker_params = broker_params
         self._consuming_thread = None
         self._connection = None
-        self._channel = None
         self._state_lock = threading.Lock()
 
         self._stop_requested = False
+
+    def _bounded_broker_params(self):
+        params = copy.copy(self._broker_params)
+        params.connection_attempts = 1
+        params.stack_timeout = min(
+            params.stack_timeout or BROKER_SETUP_TIMEOUT,
+            BROKER_SETUP_TIMEOUT,
+        )
+        params.socket_timeout = min(
+            params.socket_timeout or BROKER_SETUP_TIMEOUT,
+            params.stack_timeout,
+        )
+        params.blocked_connection_timeout = min(
+            params.blocked_connection_timeout or BROKER_SETUP_TIMEOUT,
+            BROKER_SETUP_TIMEOUT,
+        )
+        return params
 
     def to_delete_callback(self, channel, method, properties, body):
         orthanc_id = body.decode('utf8')
@@ -159,8 +177,14 @@ class OrthancReplicator:
             try:
 
                 # initialize connection to rabbitmq
-                connection = pika.BlockingConnection(self._broker_params)
+                connection = pika.BlockingConnection(self._bounded_broker_params())
                 channel = connection.channel()
+
+                with self._state_lock:
+                    if self._stop_requested:
+                        connection.close()
+                        return
+                    self._connection = connection
 
                 # These steps should have been done in the lua, but they are idempotent
                 channel.exchange_declare(exchange="orthanc-exchange", exchange_type="direct", durable=True)
@@ -202,10 +226,7 @@ class OrthancReplicator:
 
                 with self._state_lock:
                     if self._stop_requested:
-                        connection.close()
                         return
-                    self._connection = connection
-                    self._channel = channel
 
                 logger.info("Broker connection configured, waiting for messages...")
                 channel.start_consuming() # this never ends
@@ -218,7 +239,6 @@ class OrthancReplicator:
                 with self._state_lock:
                     if self._connection is connection:
                         self._connection = None
-                        self._channel = None
                 if connection is not None and connection.is_open:
                     connection.close()
 
@@ -227,11 +247,10 @@ class OrthancReplicator:
         with self._state_lock:
             self._stop_requested = True
             connection = self._connection
-            channel = self._channel
 
-        if connection is not None and channel is not None and connection.is_open:
+        if connection is not None and connection.is_open:
             try:
-                connection.add_callback_threadsafe(channel.stop_consuming)
+                connection.add_callback_threadsafe(connection.close)
             except pika.exceptions.ConnectionWrongStateError:
                 pass
 

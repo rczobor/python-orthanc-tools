@@ -2,6 +2,8 @@ import threading
 import unittest
 from unittest.mock import patch
 
+import pika
+
 from orthanc_tools import OrthancReplicator
 
 
@@ -34,10 +36,9 @@ class FakeChannel:
 
 
 class FakeConnection:
-    is_open = True
-
     def __init__(self, channel):
         self._channel = channel
+        self.is_open = True
 
     def channel(self):
         return self._channel
@@ -46,7 +47,8 @@ class FakeConnection:
         callback()
 
     def close(self):
-        pass
+        self.is_open = False
+        self._channel.stopped.set()
 
 
 class AliveOrthanc:
@@ -55,10 +57,32 @@ class AliveOrthanc:
 
 
 class TestOrthancReplicatorLifecycle(unittest.TestCase):
+    def test_connection_setup_uses_bounded_parameters(self):
+        broker_params = pika.ConnectionParameters(
+            connection_attempts=3,
+            socket_timeout=None,
+            stack_timeout=None,
+            blocked_connection_timeout=None,
+        )
+        replicator = OrthancReplicator(AliveOrthanc(), AliveOrthanc(), broker_params)
+
+        bounded_params = replicator._bounded_broker_params()
+
+        self.assertEqual(1, bounded_params.connection_attempts)
+        self.assertEqual(5, bounded_params.socket_timeout)
+        self.assertEqual(5, bounded_params.stack_timeout)
+        self.assertEqual(5, bounded_params.blocked_connection_timeout)
+        self.assertEqual(3, broker_params.connection_attempts)
+        self.assertIsNone(broker_params.socket_timeout)
+
     def test_stop_waits_for_its_consumer_thread(self):
         channel = FakeChannel()
         connection = FakeConnection(channel)
-        replicator = OrthancReplicator(AliveOrthanc(), AliveOrthanc(), object())
+        replicator = OrthancReplicator(
+            AliveOrthanc(),
+            AliveOrthanc(),
+            pika.ConnectionParameters(),
+        )
 
         with patch("orthanc_tools.orthanc_replicator.pika.BlockingConnection", return_value=connection):
             replicator.execute()
