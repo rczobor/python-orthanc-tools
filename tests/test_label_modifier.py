@@ -171,9 +171,16 @@ class TestLabelModifier(unittest.TestCase):
         deadline = time.monotonic() + timeout
         last_status_code = None
 
-        while time.monotonic() < deadline:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             try:
-                response = requests.get(url=url + "/settings/roles", auth=auth)
+                response = requests.get(
+                    url=url + "/settings/roles",
+                    auth=auth,
+                    timeout=min(5, remaining),
+                )
                 if response.status_code == 200:
                     return
                 last_status_code = response.status_code
