@@ -8,6 +8,7 @@ import re
 import threading
 import queue
 from collections import Counter
+from pathlib import Path
 from strenum import StrEnum
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -211,9 +212,12 @@ class OrthancForwarder:
 
     def execute(self):  # runs forever !
         self.wait_orthanc_started()
+        heartbeat_file = os.environ.get("HEARTBEAT_FILE")
 
         while True:
             self.handle_all_content()
+            if heartbeat_file:
+                Path(heartbeat_file).touch()
             time.sleep(self._polling_interval_in_seconds)
 
     def _process_resources(self, worker_id):
@@ -247,6 +251,20 @@ class OrthancForwarder:
         logger.debug(f"Stopping Forwarder thread {worker_id}")
 
     def handle_all_content(self):
+        # Fetch work before starting non-daemon threads. If the source API
+        # fails, the process can exit and Docker can restart it cleanly.
+        if self._trigger == ChangeType.STABLE_STUDY:
+            resource_type = "study"
+            resource_ids = self._source.studies.get_all_ids()
+        elif self._trigger == ChangeType.STABLE_SERIES:
+            resource_type = "series"
+            resource_ids = self._source.series.get_all_ids()
+        elif self._trigger == ChangeType.NEW_INSTANCE:
+            resource_type = "instance"
+            resource_ids = self._source.instances.get_all_ids()
+        else:
+            raise NotImplementedError()
+
         # create worker threads
         for thread_id in range(0, self._worker_threads_count):
             self._worker_threads.append(threading.Thread(
@@ -259,31 +277,8 @@ class OrthancForwarder:
         for wt in self._worker_threads:
             wt.start()
 
-        if self._trigger == ChangeType.STABLE_STUDY:
-            studies_ids = self._source.studies.get_all_ids()
-            if len(studies_ids) > 0:
-                for study_id in studies_ids:
-                    self._resources_to_process.put(ResourceToForward(type="study", resource_id=study_id))
-            else:
-                logger.debug("No studies found in Orthanc")
-
-        elif self._trigger == ChangeType.STABLE_SERIES:
-            series_ids = self._source.series.get_all_ids()
-            if len(series_ids) > 0:
-                for series_id in series_ids:
-                    self._resources_to_process.put(ResourceToForward(type="series", resource_id=series_id))
-            else:
-                logger.debug("No series found in Orthanc")
-
-        elif self._trigger == ChangeType.NEW_INSTANCE:
-            instances_ids = self._source.instances.get_all_ids()
-            if len(instances_ids) > 0:
-                for instance_id in instances_ids:
-                    self._resources_to_process.put(ResourceToForward(type="instance", resource_id=instance_id))
-            else:
-                logger.debug("No instances found in Orthanc")
-        else:
-            raise NotImplementedError()
+        for resource_id in resource_ids:
+            self._resources_to_process.put(ResourceToForward(type=resource_type, resource_id=resource_id))
 
         # post one 'empty' exit message per thread to unlock the threads from waiting on the process queue
         for i in range(0, self._worker_threads_count):

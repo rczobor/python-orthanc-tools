@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from orthanc_api_client import exceptions
+from orthanc_api_client import ChangeType, exceptions
 
 from orthanc_tools.orthanc_cloner import OrthancCloner
 from orthanc_tools.orthanc_forwarder import (
@@ -133,6 +133,45 @@ class TestOrthancForwarderConfiguration(unittest.TestCase):
 
         self.assertEqual(1, len(destinations))
         self.assertEqual("CT, ABDOMEN", destinations[0].study_description_pattern)
+
+
+class TestOrthancForwarderLifecycle(unittest.TestCase):
+
+    def test_execute_updates_heartbeat_after_successful_pass(self):
+        forwarder = OrthancForwarder(
+            source=mock.MagicMock(),
+            destinations=[],
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            heartbeat_path = os.path.join(temp_dir, "forwarder-heartbeat")
+            with mock.patch.dict(os.environ, {"HEARTBEAT_FILE": heartbeat_path}):
+                with mock.patch.object(forwarder, "wait_orthanc_started"):
+                    with mock.patch.object(
+                        forwarder,
+                        "handle_all_content",
+                        side_effect=[None, RuntimeError("stop")],
+                    ):
+                        with mock.patch("orthanc_tools.orthanc_forwarder.time.sleep"):
+                            with self.assertRaisesRegex(RuntimeError, "stop"):
+                                forwarder.execute()
+
+            self.assertTrue(os.path.isfile(heartbeat_path))
+
+    def test_source_failure_does_not_leave_worker_threads_running(self):
+        source = mock.MagicMock()
+        source.studies.get_all_ids.side_effect = RuntimeError("source unavailable")
+        forwarder = OrthancForwarder(
+            source=source,
+            destinations=[],
+            trigger=ChangeType.STABLE_STUDY,
+        )
+
+        with mock.patch("orthanc_tools.orthanc_forwarder.threading.Thread") as thread:
+            with self.assertRaisesRegex(RuntimeError, "source unavailable"):
+                forwarder.handle_all_content()
+
+        thread.assert_not_called()
 
 
 class FakeInstancesSet:
