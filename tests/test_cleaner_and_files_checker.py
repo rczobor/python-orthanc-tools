@@ -49,7 +49,7 @@ class TestOrthancFilesCheckerFailures(unittest.TestCase):
         api_client = mock.MagicMock()
         api_client.studies.get_all_ids.return_value = ["study-1"]
         api_client.studies.get_instances_ids.return_value = ["instance-1"]
-        api_client.instances.get_file.side_effect = exceptions.ConnectionError()
+        api_client.post.side_effect = exceptions.ConnectionError()
 
         with tempfile.TemporaryDirectory() as temp_dir:
             report_path = os.path.join(temp_dir, "missing.csv")
@@ -78,7 +78,7 @@ class TestOrthancFilesCheckerFailures(unittest.TestCase):
         api_client = mock.MagicMock()
         api_client.studies.get_all_ids.return_value = ["study-1"]
         api_client.studies.get_instances_ids.return_value = ["instance-1"]
-        api_client.instances.get_file.side_effect = missing_file_error
+        api_client.post.side_effect = missing_file_error
         api_client.studies.get.return_value = study
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -87,9 +87,14 @@ class TestOrthancFilesCheckerFailures(unittest.TestCase):
 
             with open(report_path) as report:
                 self.assertEqual(
-                    "PATIENT,NAME,20260828,DESCRIPTION,1.2.3\n",
+                    "PATIENT,NAME,20260828,DESCRIPTION,1.2.3,instance-1\n",
                     report.read(),
                 )
+
+        api_client.post.assert_called_once_with(
+            "instances/instance-1/attachments/dicom/verify-md5"
+        )
+        api_client.instances.get_file.assert_not_called()
 
     def test_report_escapes_dicom_values(self):
         study = SimpleNamespace(
@@ -106,11 +111,14 @@ class TestOrthancFilesCheckerFailures(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             report_path = os.path.join(temp_dir, "missing.csv")
-            OrthancFilesChecker(mock.MagicMock(), report_path).add_study_to_list(study)
+            OrthancFilesChecker(mock.MagicMock(), report_path).add_study_to_list(
+                study,
+                "instance-1",
+            )
 
             with open(report_path, newline="") as report:
                 self.assertEqual(
-                    [["PATIENT", 'Family, "Given"', "20260828", "CT, contrast", "1.2.3"]],
+                    [["PATIENT", 'Family, "Given"', "20260828", "CT, contrast", "1.2.3", "instance-1"]],
                     list(csv.reader(report)),
                 )
 if __name__ == "__main__":

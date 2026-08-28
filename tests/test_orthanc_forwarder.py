@@ -385,6 +385,22 @@ class TestOrthancForwarderFilteringBehavior(unittest.TestCase):
         get_study_description.assert_called_once_with(instances_set)
         forward_to_destination.assert_not_called()
 
+    def test_terminal_status_cache_is_bounded(self):
+        forwarder = OrthancForwarder(
+            source=mock.MagicMock(),
+            destinations=[],
+        )
+        first = FakeInstancesSet()
+        second = FakeInstancesSet()
+        second.id = "study-2"
+
+        with mock.patch("orthanc_tools.orthanc_forwarder.TERMINAL_STATUS_CACHE_SIZE", 1):
+            forwarder.handle_instances_set(first)
+            forwarder.handle_instances_set(second)
+
+        self.assertNotIn(first.id, forwarder._status)
+        self.assertTrue(forwarder._status[second.id].terminal)
+
     def test_already_sent_study_is_deleted_when_remaining_filtered_destinations_do_not_match(self):
         forwarder = OrthancForwarder(
             source=mock.MagicMock(),

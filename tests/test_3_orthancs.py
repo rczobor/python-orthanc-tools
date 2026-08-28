@@ -1365,6 +1365,7 @@ class Test3Orthancs(unittest.TestCase):
     def test_files_checker_with_invalid_storage(self):
         self.oa.delete_all_content()
         self.oa.upload_file(here / "stimuli/CT_small.dcm")
+        missing_instance_id = self.oa.instances.get_all_ids()[0]
 
         # delete the file from the storage
         subprocess.run(
@@ -1393,7 +1394,11 @@ class Test3Orthancs(unittest.TestCase):
             with open(missing_files_list_file_path, "r") as file:
                 file_content = file.readline()
                 file_content = file_content.replace("\n", "")
-                self.assertEqual(file_content, '1CT1,CompressedSamples^CT1,20040119,e+1,1.3.6.1.4.1.5962.1.2.1.20040119072730.12322')
+                self.assertEqual(
+                    file_content,
+                    '1CT1,CompressedSamples^CT1,20040119,e+1,1.3.6.1.4.1.5962.1.2.1.20040119072730.12322,'
+                    + missing_instance_id,
+                )
 
 
 

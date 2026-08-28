@@ -7,7 +7,7 @@ import os
 import re
 import threading
 import queue
-from collections import Counter
+from collections import Counter, deque
 from pathlib import Path
 from strenum import StrEnum
 from dataclasses import dataclass, field
@@ -18,6 +18,7 @@ from .orthanc_monitor import ChangeType
 
 logger = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL_SECONDS = 10
+TERMINAL_STATUS_CACHE_SIZE = 10000
 UNKNOWN_LOG_CONTEXT_VALUE = "unknown"
 REMOTE_AET_METADATA_NAMES = ("RemoteAET", "RemoteAet")
 
@@ -188,6 +189,7 @@ class OrthancForwarder:
         self._on_instances_set_forwarded = on_instances_set_forwarded
         self._on_instances_set_forward_error = on_instances_set_forward_error
         self._status = {}
+        self._terminal_status_ids = deque()
         self._resources_to_process = queue.Queue(worker_threads_count + 1)
         self._worker_threads_count = worker_threads_count
         self._worker_threads = []
@@ -411,6 +413,13 @@ class OrthancForwarder:
         status.next_retry = None
         status.retry_count = 0
         status.terminal = True
+        self._terminal_status_ids.append(instances_set.id)
+
+        while len(self._terminal_status_ids) > TERMINAL_STATUS_CACHE_SIZE:
+            expired_id = self._terminal_status_ids.popleft()
+            expired_status = self._status.get(expired_id)
+            if expired_status is not None and expired_status.terminal:
+                del self._status[expired_id]
 
     def forward(self, instances_set, already_sent_to_destinations: List[str]) -> Tuple[List[str], List[str]]:  # returns (sent destinations, eligible destinations)
         sent_to_destinations = list(already_sent_to_destinations)

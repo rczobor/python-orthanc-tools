@@ -3,7 +3,7 @@
 This script will check that every single instance of an Orthanc has actually a file in the storage location.
 It will ouput a csv file with the following information:
 
-PatientID,PatientName,StudyDate,StudyDescription,StudyInstanceUID,MissingFilePath
+PatientID,PatientName,StudyDate,StudyDescription,StudyInstanceUID,MissingInstanceID
 
 The script will get the list of all studies.
 For each study:
@@ -64,16 +64,18 @@ class OrthancFilesChecker:
             # for each instance
             for instance_id in instances_ids:
                 try:
-                    self._api_client.instances.get_file(instance_id)
+                    self._api_client.post(
+                        f"instances/{instance_id}/attachments/dicom/verify-md5"
+                    )
                 except exceptions.HttpError as ex:
                     if not is_missing_storage_file_error(ex):
                         raise
                     study = self._api_client.studies.get(orthanc_id=study_id)
-                    self.add_study_to_list(study)
+                    self.add_study_to_list(study, instance_id)
                     break
 
 
-    def add_study_to_list(self, study):
+    def add_study_to_list(self, study, missing_instance_id):
         '''
         add a line to the file with the study_info
         '''
@@ -91,6 +93,7 @@ class OrthancFilesChecker:
                 StudyDate,
                 StudyDescription,
                 StudyInstanceUID,
+                missing_instance_id,
             ])
 
 
