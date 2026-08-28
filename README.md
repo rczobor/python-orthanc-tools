@@ -10,7 +10,7 @@ Functionalities are very limited now !  Backward compat will break a lot in the 
 pip3 install orthanc-tools
 ```
 
-Docker images in examples should use the package version you deploy. In this checkout, the package version is `0.19.1`. In the parent `/docker` repository, production stacks build this submodule as the local image `python-orthanc-tools:local`.
+Docker images in examples should use the package version you deploy. In this checkout, the package version is `0.21.2`. In the parent `/docker` repository, production stacks build this submodule as the local image `python-orthanc-tools:local`.
 
 
 ## cloning an Orthanc to another
@@ -46,7 +46,7 @@ or, inside a docker-compose file:
 ```yaml
 services:
     orthanc-cloner:
-        image: orthancteam/python-orthanc-tools:0.19.1
+        image: orthancteam/python-orthanc-tools:0.21.2
         volumes: ["orthanc-cloner:/status"]
         environment:
             TZ: "Etc/UTC"
@@ -222,7 +222,7 @@ python3 -m orthanc_tools.orthanc_cleaner --url=http://localhost:8042 --user=orth
 ## Deploy an HL7 server parsing ORM^O01 messages to create and store worklists files in a folder
 ```
    hl7-server:
-        image: orthancteam/python-orthanc-tools:0.19.1
+        image: orthancteam/python-orthanc-tools:0.21.2
         ports: ["2575:2575"]
         volumes: ["/worklists:/worklists"]
         restart: unless-stopped

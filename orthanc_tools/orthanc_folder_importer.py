@@ -69,20 +69,29 @@ class OrthancFolderImporter:
 
         self._lock = threading.Lock()
         self._orthanc_lock = threading.Lock()
+        self._next_orthanc_reconnect_attempt = 0
 
     def _wait_until_orthanc_is_ready(self) -> bool:
         """Pause briefly for transient outages and return whether Orthanc recovered."""
         with self._orthanc_lock:
             if self._api_client.is_alive():
+                self._next_orthanc_reconnect_attempt = 0
                 return True
+
+            if time.monotonic() < self._next_orthanc_reconnect_attempt:
+                return False
 
             logger.warning("Orthanc is unreachable. Pausing all worker threads...")
             for _ in range(ORTHANC_READY_MAX_CHECKS):
                 time.sleep(ORTHANC_READY_RECHECK_DELAY_SECONDS)
                 if self._api_client.is_alive():
+                    self._next_orthanc_reconnect_attempt = 0
                     logger.info("Orthanc is back up! Resuming workers.")
                     return True
 
+            self._next_orthanc_reconnect_attempt = (
+                time.monotonic() + ORTHANC_READY_RECHECK_DELAY_SECONDS
+            )
             logger.error("Orthanc is still unreachable after waiting; treating this as a failed upload attempt.")
             return False
 

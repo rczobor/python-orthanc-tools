@@ -137,6 +137,19 @@ class TestOrthancForwarderConfiguration(unittest.TestCase):
 
 class TestOrthancForwarderLifecycle(unittest.TestCase):
 
+    def test_heartbeat_is_refreshed_periodically(self):
+        forwarder = OrthancForwarder(
+            source=mock.MagicMock(),
+            destinations=[],
+        )
+        stop_event = mock.Mock()
+        stop_event.wait.side_effect = [False, True]
+
+        with mock.patch("orthanc_tools.orthanc_forwarder.Path.touch") as touch:
+            forwarder._heartbeat_loop("/heartbeat", stop_event)
+
+        self.assertEqual(2, touch.call_count)
+
     def test_execute_updates_heartbeat_after_successful_pass(self):
         forwarder = OrthancForwarder(
             source=mock.MagicMock(),
@@ -430,6 +443,25 @@ class TestOrthancForwarderFilteringBehavior(unittest.TestCase):
         forward_to_destination.assert_called_once_with(instances_set=instances_set, destination=forwarder._destinations[0])
 
 class TestOrthancFolderImporterConnectivity(unittest.TestCase):
+
+    def test_workers_share_a_failed_reconnect_window(self):
+        api_client = mock.MagicMock()
+        api_client.is_alive.return_value = False
+        importer = OrthancFolderImporter(
+            api_client=api_client,
+            folder_path=".",
+            errors_path=None,
+            state_path=None,
+        )
+
+        with mock.patch("orthanc_tools.orthanc_folder_importer.ORTHANC_READY_MAX_CHECKS", 1):
+            with mock.patch("orthanc_tools.orthanc_folder_importer.time.monotonic", return_value=100):
+                with mock.patch("orthanc_tools.orthanc_folder_importer.time.sleep") as sleep:
+                    self.assertFalse(importer._wait_until_orthanc_is_ready())
+                    self.assertFalse(importer._wait_until_orthanc_is_ready())
+
+        sleep.assert_called_once()
+        self.assertEqual(3, api_client.is_alive.call_count)
 
     def test_permanent_unreachable_orthanc_logs_error_instead_of_waiting_forever(self):
         api_client = mock.MagicMock()

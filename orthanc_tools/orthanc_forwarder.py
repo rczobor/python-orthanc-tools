@@ -17,6 +17,7 @@ from orthanc_api_client import OrthancApiClient, InstancesSet, ResourceType, Res
 from .orthanc_monitor import ChangeType
 
 logger = logging.getLogger(__name__)
+HEARTBEAT_INTERVAL_SECONDS = 10
 UNKNOWN_LOG_CONTEXT_VALUE = "unknown"
 REMOTE_AET_METADATA_NAMES = ("RemoteAET", "RemoteAet")
 
@@ -213,12 +214,31 @@ class OrthancForwarder:
     def execute(self):  # runs forever !
         self.wait_orthanc_started()
         heartbeat_file = os.environ.get("HEARTBEAT_FILE")
+        heartbeat_stop = None
+        heartbeat_thread = None
 
-        while True:
-            self.handle_all_content()
-            if heartbeat_file:
-                Path(heartbeat_file).touch()
-            time.sleep(self._polling_interval_in_seconds)
+        if heartbeat_file:
+            heartbeat_stop = threading.Event()
+            heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                args=(heartbeat_file, heartbeat_stop),
+                name="OrthancForwarder heartbeat",
+            )
+            heartbeat_thread.start()
+
+        try:
+            while True:
+                self.handle_all_content()
+                time.sleep(self._polling_interval_in_seconds)
+        finally:
+            if heartbeat_stop:
+                heartbeat_stop.set()
+                heartbeat_thread.join()
+
+    def _heartbeat_loop(self, heartbeat_file, stop_event):
+        Path(heartbeat_file).touch()
+        while not stop_event.wait(HEARTBEAT_INTERVAL_SECONDS):
+            Path(heartbeat_file).touch()
 
     def _process_resources(self, worker_id):
         logger.debug(f"Starting Forwarder thread {worker_id}")
