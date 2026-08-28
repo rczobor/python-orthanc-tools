@@ -11,6 +11,7 @@ from orthanc_api_client import OrthancApiClient, ResourceType, JobStatus, Resour
 
 logger = logging.getLogger(__name__)
 BROKER_SETUP_TIMEOUT = 5
+CONSUMER_STOP_TIMEOUT = 10
 
 class OrthancReplicator:
     '''
@@ -90,6 +91,10 @@ class OrthancReplicator:
             params.blocked_connection_timeout or BROKER_SETUP_TIMEOUT,
             BROKER_SETUP_TIMEOUT,
         )
+        if not isinstance(params.heartbeat, (int, float)) or params.heartbeat <= 0:
+            params.heartbeat = BROKER_SETUP_TIMEOUT
+        else:
+            params.heartbeat = min(params.heartbeat, BROKER_SETUP_TIMEOUT)
         return params
 
     def to_delete_callback(self, channel, method, properties, body):
@@ -256,12 +261,14 @@ class OrthancReplicator:
                 pass
 
         if self._consuming_thread is not None:
-            self._consuming_thread.join(10)
+            self._consuming_thread.join(CONSUMER_STOP_TIMEOUT)
             if self._consuming_thread.is_alive():
-                raise RuntimeError("Replicator consumer thread did not stop")
+                logger.error("Replicator consumer thread did not stop before the shutdown deadline")
 
     def execute(self):
-        self._consuming_thread = threading.Thread(target=self._consume)
+        # Pika's blocking setup RPCs cannot process a thread-safe close callback.
+        # A daemon thread keeps a stuck broker RPC from preventing process exit.
+        self._consuming_thread = threading.Thread(target=self._consume, daemon=True)
         self._consuming_thread.start()
 
 # example:

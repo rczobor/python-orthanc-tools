@@ -55,6 +55,21 @@ class FakeConnection:
         self._channel.stopped.set()
 
 
+class BlockingChannelConnection(FakeConnection):
+    def __init__(self, channel):
+        super().__init__(channel)
+        self.channel_started = threading.Event()
+        self.release_channel = threading.Event()
+
+    def channel(self):
+        self.channel_started.set()
+        self.release_channel.wait()
+        return self._channel
+
+    def add_callback_threadsafe(self, callback):
+        pass
+
+
 class AliveOrthanc:
     def is_alive(self):
         return True
@@ -88,6 +103,7 @@ class TestOrthancReplicatorLifecycle(unittest.TestCase):
         self.assertEqual(5, bounded_params.socket_timeout)
         self.assertEqual(5, bounded_params.stack_timeout)
         self.assertEqual(5, bounded_params.blocked_connection_timeout)
+        self.assertEqual(5, bounded_params.heartbeat)
         self.assertEqual(3, broker_params.connection_attempts)
         self.assertIsNone(broker_params.socket_timeout)
 
@@ -114,6 +130,30 @@ class TestOrthancReplicatorLifecycle(unittest.TestCase):
                 channel.stopped.set()
                 replicator._stop_requested = True
                 replicator._consuming_thread.join(1)
+
+    def test_blocked_setup_cannot_prevent_process_shutdown(self):
+        channel = FakeChannel()
+        connection = BlockingChannelConnection(channel)
+        replicator = OrthancReplicator(
+            AliveOrthanc(),
+            AliveOrthanc(),
+            pika.ConnectionParameters(),
+        )
+
+        with patch("orthanc_tools.orthanc_replicator.pika.BlockingConnection", return_value=connection):
+            with patch("orthanc_tools.orthanc_replicator.CONSUMER_STOP_TIMEOUT", 0.01):
+                replicator.execute()
+                try:
+                    self.assertTrue(connection.channel_started.wait(1))
+                    self.assertTrue(replicator._consuming_thread.daemon)
+                    replicator.stop()
+                    self.assertTrue(replicator._consuming_thread.is_alive())
+                finally:
+                    connection.release_channel.set()
+                    replicator._stop_requested = True
+                    replicator._consuming_thread.join(1)
+
+        self.assertFalse(replicator._consuming_thread.is_alive())
 
 
 if __name__ == "__main__":
