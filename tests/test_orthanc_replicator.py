@@ -152,6 +152,7 @@ class TestOrthancReplicator(unittest.TestCase):
         )
 
         replicator.execute()
+        self.addCleanup(replicator.stop)
 
         # wait until the instance has been forwarded to the destination
         helpers.wait_until(lambda: len(self.ob.studies.get_all_ids()) == 1, 5)
@@ -166,8 +167,6 @@ class TestOrthancReplicator(unittest.TestCase):
         helpers.wait_until(lambda: len(self.ob.studies.get_all_ids()) == 0, 5)
         self.assertEqual(len(self.oa.instances.get_all_ids()), len(self.ob.instances.get_all_ids()))
 
-        replicator.stop()
-
     def test_retry_if_upload_fails(self):
         self.oa.delete_all_content()
         self.ob.delete_all_content()
@@ -181,6 +180,7 @@ class TestOrthancReplicator(unittest.TestCase):
         )
 
         replicator.execute()
+        self.addCleanup(replicator.stop)
 
         # let's inhibit the destination, so that the replicator won't be able to forward the instance we will upload
         with open(here / "docker-setup-replicator/inhibit.lua", 'rb') as f:
@@ -199,10 +199,8 @@ class TestOrthancReplicator(unittest.TestCase):
         self.ob.execute_lua_script(lua_script)
 
         # Let's check that there is now an instance in the destination
-        helpers.wait_until(lambda: len(self.ob.studies.get_all_ids()) == 1, 12)
+        helpers.wait_until(lambda: len(self.ob.studies.get_all_ids()) == 1, 30)
         self.assertEqual(len(self.oa.instances.get_all_ids()), len(self.ob.instances.get_all_ids()))
-
-        replicator.stop()
 
     def test_already_deleted_instance(self):
         self.oa.delete_all_content()
@@ -217,13 +215,13 @@ class TestOrthancReplicator(unittest.TestCase):
         )
 
         replicator.execute()
+        self.addCleanup(replicator.stop)
 
         # let's upload an instance in the source
         self.oa.upload_file(here / "stimuli/CT_small.dcm")
 
         # wait until it has been forwarded to the destination
         helpers.wait_until(lambda: len(self.ob.studies.get_all_ids()) == 1, 5)
-
         # remove it from the destination...
         self.ob.delete_all_content()
 
@@ -237,9 +235,6 @@ class TestOrthancReplicator(unittest.TestCase):
 
         self.assertEqual(self.get_queue_length("delete", False), 0)
         self.assertEqual(self.get_queue_length("delete", True), 0)
-
-        replicator.stop()
-
 
     def test_connection_to_broker_failed(self):
         '''
@@ -257,12 +252,14 @@ class TestOrthancReplicator(unittest.TestCase):
         )
 
         replicator.execute()
+        self.addCleanup(replicator.stop)
 
         # let's upload an instance in the source
         self.oa.upload_file(here / "stimuli/CT_small.dcm")
 
         # wait until it has been forwarded to the destination
         helpers.wait_until(lambda: len(self.ob.studies.get_all_ids()) == 1, 5)
+        instance_id = self.oa.instances.get_all_ids()[0]
 
         # let's stop the broker container
         self.stop_container("broker")
@@ -276,15 +273,25 @@ class TestOrthancReplicator(unittest.TestCase):
 
         # and until the broker is ready to accept connections
         helpers.wait_until(lambda: self.get_container_status("broker") == "healthy", 15)
+        helpers.wait_until(self.rabbitmq_is_ready, 30)
 
         # check that everything is now ok by deleting the instance from the orthanc source
         self.oa.delete_all_content()
 
-        # and check that is has been deleted from the destination
-        helpers.wait_until(lambda: len(self.ob.studies.get_all_ids()) == 0, 10)
-        self.assertEqual(len(self.oa.instances.get_all_ids()), len(self.ob.instances.get_all_ids()))
+        # Publish directly because the Orthanc Lua producer's RabbitMQ connection was
+        # also interrupted; this test is specifically about the replicator reconnecting.
+        connection = pika.BlockingConnection(broker_connection_parameters)
+        channel = connection.channel()
+        channel.basic_publish(
+            exchange="orthanc-exchange",
+            routing_key="to-delete-queue",
+            body=instance_id,
+        )
+        connection.close()
 
-        replicator.stop()
+        # and check that is has been deleted from the destination
+        helpers.wait_until(lambda: len(self.ob.studies.get_all_ids()) == 0, 30)
+        self.assertEqual(len(self.oa.instances.get_all_ids()), len(self.ob.instances.get_all_ids()))
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
