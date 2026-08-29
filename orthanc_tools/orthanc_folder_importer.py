@@ -8,6 +8,7 @@ import os, time, sys
 import multiprocessing
 import queue
 import threading
+from pathlib import Path
 
 from orthanc_tools.helpers.environment import get_env_bool
 
@@ -268,6 +269,12 @@ class OrthancFolderImporter:
             for path in path_entries:
                 full_path = os.path.join(path_to_upload, path)
                 try:
+                    _, extension = os.path.splitext(full_path)
+                    clear_study_context = (
+                        os.path.isfile(full_path)
+                        and extension.lower() in self._skip_extensions
+                        and self._has_paired_report(path, path_entries)
+                    )
                     archive_group = paired_archive_groups.get(path)
                     if archive_group:
                         if archive_group in processed_archive_groups:
@@ -292,6 +299,8 @@ class OrthancFolderImporter:
                             path_to_upload=full_path,
                             study_orthanc_id=study_id,
                         )
+                        if clear_study_context:
+                            study_id = None
                 except Exception as e:
                     logger.exception(f"Error while processing folder entry: {full_path}")
                     study_id = None
@@ -348,14 +357,28 @@ class OrthancFolderImporter:
 
         logger.debug("Processing thread stopped")
 
+    @staticmethod
+    def _strip_role_suffix(stem):
+        for role in ("images", "reports", "image", "report", "dicom", "pdf"):
+            for separator in ("-", "_", ".", " "):
+                suffix = f"{separator}{role}"
+                if stem.endswith(suffix):
+                    return stem[:-len(suffix)]
+        return stem
+
+    def _has_paired_report(self, name, path_entries):
+        stem = self._strip_role_suffix(
+            os.path.splitext(os.path.basename(name.lower()))[0]
+        )
+        return any(
+            candidate.lower().endswith(".pdf")
+            and self._strip_role_suffix(
+                os.path.splitext(os.path.basename(candidate.lower()))[0]
+            ) == stem
+            for candidate in path_entries
+        )
+
     def _paired_archive_groups(self, folder_path, path_entries):
-        def strip_role_suffix(stem):
-            for role in ("images", "reports", "image", "report", "dicom", "pdf"):
-                for separator in ("-", "_", ".", " "):
-                    suffix = f"{separator}{role}"
-                    if stem.endswith(suffix):
-                        return stem[:-len(suffix)]
-            return stem
 
         groups = {}
         for name in path_entries:
@@ -369,12 +392,16 @@ class OrthancFolderImporter:
                     if not member.is_dir()
                 ]
             has_pdf = any(member.endswith(".pdf") for member in member_names)
-            has_dicom = any(not member.endswith(".pdf") for member in member_names)
+            has_dicom = any(
+                not member.endswith(".pdf")
+                and os.path.splitext(member)[1] not in self._skip_extensions
+                for member in member_names
+            )
             if not has_pdf and not has_dicom:
                 continue
             priority = 1 if has_dicom else 2
             stem = os.path.splitext(os.path.basename(name.lower()))[0]
-            groups.setdefault(strip_role_suffix(stem), []).append((name, priority))
+            groups.setdefault(self._strip_role_suffix(stem), []).append((name, priority))
 
         paired = {}
         for entries in groups.values():
@@ -429,37 +456,40 @@ class OrthancFolderImporter:
             if name.lower() in report_roles
             and os.path.isdir(os.path.join(folder_path, name))
         }
+        centralized_dirs = centralized_image_dirs | centralized_report_dirs
         if centralized_image_dirs and centralized_report_dirs:
             expanded_entries = []
-            centralized_dirs = centralized_image_dirs | centralized_report_dirs
+
+            def append_files(path, relative_path):
+                for child_name in os.listdir(path):
+                    child_path = os.path.join(path, child_name)
+                    child_relative_path = os.path.join(relative_path, child_name)
+                    if os.path.isdir(child_path):
+                        append_files(child_path, child_relative_path)
+                    else:
+                        expanded_entries.append(child_relative_path)
+
             for name in path_entries:
                 if name not in centralized_dirs:
                     expanded_entries.append(name)
                     continue
                 path = os.path.join(folder_path, name)
                 try:
-                    expanded_entries.extend(
-                        os.path.join(name, child_name)
-                        for child_name in os.listdir(path)
-                    )
+                    append_files(path, name)
                 except OSError:
                     expanded_entries.append(name)
             path_entries = expanded_entries
 
         def strip_role_suffix(stem):
-            for role in ("images", "reports", "image", "report", "dicom", "pdf"):
-                if stem == role:
-                    return ""
-                for separator in ("-", "_", ".", " "):
-                    suffix = f"{separator}{role}"
-                    if stem.endswith(suffix):
-                        return stem[:-len(suffix)]
-            return stem
+            return "" if stem in image_roles | report_roles else self._strip_role_suffix(stem)
 
         def pairing_stem(name):
             path = os.path.join(folder_path, name)
             base_name = os.path.basename(name.lower())
             if os.path.isfile(path):
+                parts = Path(name).parts
+                if len(parts) > 2 and parts[0] in centralized_dirs:
+                    return os.path.join(*parts[1:-1]).lower()
                 return os.path.splitext(base_name)[0]
 
             return strip_role_suffix(base_name)
@@ -511,7 +541,8 @@ class OrthancFolderImporter:
                 candidates = [
                     report_group
                     for report_group in report_groups
-                    if any(
+                    if strip_role_suffix(report_group) == stem
+                    or any(
                         stem.startswith(f"{report_group}{separator}")
                         for separator in ("-", "_", ".", " ")
                     )
