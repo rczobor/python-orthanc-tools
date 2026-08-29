@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 import tempfile
@@ -423,6 +424,84 @@ class TestOrthancFolderImporter(unittest.TestCase):
             pdf_path=mock.ANY,
             series_description="PDF report",
         )
+
+    def test_unreadable_child_does_not_block_healthy_sibling(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-id"]
+        api_client.instances.get_parent_study_id.return_value = "study-id"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            unreadable_dir = Path(temp_dir, "a-unreadable")
+            unreadable_dir.mkdir()
+            image_path = Path(temp_dir, "image.dcm")
+            image_path.write_bytes(b"dicom")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+            real_listdir = os.listdir
+
+            def listdir(path):
+                if os.path.abspath(path) == os.path.abspath(unreadable_dir):
+                    raise PermissionError("unreadable")
+                return real_listdir(path)
+
+            with mock.patch(
+                "orthanc_tools.orthanc_folder_importer.os.listdir",
+                side_effect=listdir,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "folder entries"):
+                    importer.upload_and_label(temp_dir)
+
+        api_client.upload.assert_called_once_with(b"dicom", ignore_errors=True)
+
+    def test_execute_propagates_worker_failures(self):
+        api_client = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                worker_threads_count=1,
+                dicomize_pdf=True,
+            )
+
+            with mock.patch.object(
+                importer,
+                "upload_and_label",
+                side_effect=PermissionError("unreadable"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "worker failed"):
+                    importer.execute()
+
+    def test_pdf_off_folder_traversal_skips_priority_scan(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-id"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "image.dcm").write_bytes(b"dicom")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+            )
+
+            with mock.patch.object(
+                importer,
+                "_list_and_sort_dir",
+                side_effect=AssertionError("priority scan should not run"),
+            ):
+                importer.upload_and_label(temp_dir)
+
+        api_client.upload.assert_called_once_with(b"dicom", ignore_errors=True)
 
 
 if __name__ == "__main__":

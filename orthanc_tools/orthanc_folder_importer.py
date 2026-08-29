@@ -61,6 +61,7 @@ class OrthancFolderImporter:
 
         self._worker_threads_count = worker_threads_count
         self._worker_threads = []
+        self._worker_errors = []
         self._messages = queue.Queue(maxsize=2*worker_threads_count)  # this is thread safe https://docs.python.org/3.5/library/queue.html#module-queue
 
         self._folders_uploaded = []
@@ -252,10 +253,27 @@ class OrthancFolderImporter:
             ## process them
 
             study_id = study_orthanc_id
-            path_entries = self._list_and_sort_dir(path_to_upload)
+            path_entries = (
+                self._list_and_sort_dir(path_to_upload)
+                if self._dicomize_pdf
+                else os.listdir(path_to_upload)
+            )
+            folder_errors = []
             for path in path_entries:
                 full_path = os.path.join(path_to_upload, path)
-                study_id = self.upload_and_label(path_to_upload=full_path, study_orthanc_id=study_id)
+                try:
+                    study_id = self.upload_and_label(
+                        path_to_upload=full_path,
+                        study_orthanc_id=study_id,
+                    )
+                except Exception as e:
+                    logger.exception(f"Error while processing folder entry: {full_path}")
+                    folder_errors.append(e)
+
+            if folder_errors:
+                raise RuntimeError(
+                    f"Failed to process {len(folder_errors)} folder entries in {path_to_upload}"
+                ) from folder_errors[0]
 
             # let's process this folder
             # for path in os.listdir(path_to_upload):
@@ -291,19 +309,29 @@ class OrthancFolderImporter:
                 self._messages.task_done()
                 break
 
-            # path is the full path of a file or a folder
-            self.upload_and_label(path_to_upload=path)
-
-            self._messages.task_done()  # tell the queue the item has been processed
+            try:
+                # path is the full path of a file or a folder
+                self.upload_and_label(path_to_upload=path)
+            except Exception as e:
+                logger.exception(f"Importer worker failed while processing {path}")
+                with self._lock:
+                    self._worker_errors.append((path, e))
+            finally:
+                self._messages.task_done()  # tell the queue the item has been processed
 
         logger.debug("Processing thread stopped")
 
     def _list_and_sort_dir(self, folder_path):
         def sort_priority(path):
             if os.path.isdir(path):
+                try:
+                    child_names = os.listdir(path)
+                except OSError as e:
+                    logger.warning(f"Unable to inspect directory {path}: {e}")
+                    return 0
                 priorities = [
                     sort_priority(os.path.join(path, name))
-                    for name in os.listdir(path)
+                    for name in child_names
                 ]
                 if 1 in priorities:
                     return 1
@@ -381,6 +409,10 @@ class OrthancFolderImporter:
 
         # let's wait for the completion of all threads
         self.stop()
+
+        if self._worker_errors:
+            path, error = self._worker_errors[0]
+            raise RuntimeError(f"Importer worker failed while processing {path}") from error
 
         logger.info("End of upload!")
 
