@@ -187,6 +187,13 @@ class DicomWorklistBuilder:
             if temp_file_created and os.path.exists(temp_file_name):
                 os.unlink(temp_file_name)
             ds.save_as(output_path, enforce_file_format=True)
+        except OSError as ex:
+            if temp_file_created and os.path.exists(temp_file_name):
+                os.unlink(temp_file_name)
+            if ex.errno in {errno.EBUSY, errno.EROFS, errno.ENOTSUP}:
+                ds.save_as(output_path, enforce_file_format=True)
+                return file_name
+            raise
         except Exception:
             if temp_file_created and os.path.exists(temp_file_name):
                 os.unlink(temp_file_name)
