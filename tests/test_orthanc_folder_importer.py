@@ -680,6 +680,36 @@ class TestOrthancFolderImporter(unittest.TestCase):
             [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
         )
 
+    def test_centralized_role_directories_pair_descendant_studies(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            images_dir = Path(temp_dir, "images")
+            reports_dir = Path(temp_dir, "reports")
+            images_dir.mkdir()
+            reports_dir.mkdir()
+            Path(images_dir, "a.dcm").write_bytes(b"dicom-a")
+            Path(images_dir, "b.dcm").write_bytes(b"dicom-b")
+            Path(reports_dir, "a.pdf").write_bytes(b"pdf-a")
+            Path(reports_dir, "b.pdf").write_bytes(b"pdf-b")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            ["study-a", "study-b"],
+            [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

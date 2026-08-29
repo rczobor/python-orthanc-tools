@@ -352,12 +352,44 @@ class OrthancFolderImporter:
             return 0 if extension.lower() in self._skip_extensions else 1
 
         path_entries = os.listdir(path=folder_path)
+        image_roles = {"image", "images", "dicom"}
+        report_roles = {"report", "reports", "pdf"}
+        centralized_image_dirs = {
+            name
+            for name in path_entries
+            if name.lower() in image_roles
+            and os.path.isdir(os.path.join(folder_path, name))
+        }
+        centralized_report_dirs = {
+            name
+            for name in path_entries
+            if name.lower() in report_roles
+            and os.path.isdir(os.path.join(folder_path, name))
+        }
+        if centralized_image_dirs and centralized_report_dirs:
+            expanded_entries = []
+            centralized_dirs = centralized_image_dirs | centralized_report_dirs
+            for name in path_entries:
+                if name not in centralized_dirs:
+                    expanded_entries.append(name)
+                    continue
+                path = os.path.join(folder_path, name)
+                try:
+                    expanded_entries.extend(
+                        os.path.join(name, child_name)
+                        for child_name in os.listdir(path)
+                    )
+                except OSError:
+                    expanded_entries.append(name)
+            path_entries = expanded_entries
+
         def pairing_stem(name):
             path = os.path.join(folder_path, name)
+            base_name = os.path.basename(name.lower())
             stem = (
-                os.path.splitext(name.lower())[0]
+                os.path.splitext(base_name)[0]
                 if os.path.isfile(path)
-                else name.lower()
+                else base_name
             )
             for role in ("images", "reports", "image", "report", "dicom", "pdf"):
                 if stem == role:
