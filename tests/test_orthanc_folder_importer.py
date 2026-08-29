@@ -94,6 +94,60 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
         self.assertEqual(2, api_client.studies.attach_pdf.call_count)
 
+    def test_zip_preserves_study_across_sibling_directories(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-id"]
+        api_client.instances.get_parent_study_id.return_value = "study-id"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir, "study.zip")
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("a-images/image.dcm", b"dicom")
+                archive.writestr("b-reports/report.pdf", b"pdf")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(str(archive_path))
+
+        api_client.studies.attach_pdf.assert_called_once_with(
+            study_id="study-id",
+            pdf_path=mock.ANY,
+            series_description="PDF report",
+        )
+
+    def test_zip_processes_root_dicom_before_nested_report(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-id"]
+        api_client.instances.get_parent_study_id.return_value = "study-id"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir, "study.zip")
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("reports/report.pdf", b"pdf")
+                archive.writestr("image.dcm", b"dicom")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(str(archive_path))
+
+        api_client.studies.attach_pdf.assert_called_once_with(
+            study_id="study-id",
+            pdf_path=mock.ANY,
+            series_description="PDF report",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

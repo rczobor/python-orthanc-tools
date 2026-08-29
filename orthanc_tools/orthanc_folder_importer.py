@@ -238,7 +238,7 @@ class OrthancFolderImporter:
             ##  sort them (pdf at the end)
             ## process them
 
-            study_id = None
+            study_id = study_orthanc_id
             path_entries = self._list_and_sort_dir(path_to_upload)
             for path in path_entries:
                 full_path = os.path.join(path_to_upload, path)
@@ -285,17 +285,28 @@ class OrthancFolderImporter:
         logger.debug("Processing thread stopped")
 
     def _list_and_sort_dir(self, folder_path):
+        def sort_priority(name):
+            path = os.path.join(folder_path, name)
+            if os.path.isdir(path):
+                contains_pdf = False
+                for _, _, file_names in os.walk(path):
+                    lower_names = [file_name.lower() for file_name in file_names]
+                    if any(file_name.endswith(".dcm") for file_name in lower_names):
+                        return 1
+                    contains_pdf |= any(
+                        file_name.endswith(".pdf") for file_name in lower_names
+                    )
+                return 2 if contains_pdf else 0
+            if name.lower().endswith(".dcm"):
+                return 1
+            if name.lower().endswith(".pdf"):
+                return 2
+            return 0
+
         path_entries = sorted(
             os.listdir(path=folder_path),
-            key=lambda name: (
-                2 if name.lower().endswith(".pdf")
-                else 1 if name.lower().endswith(".dcm")
-                else 0,
-                name.lower()
-            )
+            key=lambda name: (sort_priority(name), name.lower()),
         )
-
-
         return path_entries
 
     def _is_folder_containing_folders_only(self, folder_path):
