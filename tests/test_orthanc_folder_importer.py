@@ -503,6 +503,43 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
         api_client.upload.assert_called_once_with(b"dicom", ignore_errors=True)
 
+    def test_non_dcm_extension_report_pairs_keep_their_study(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "study-a.ima").write_bytes(b"dicom-a")
+            Path(temp_dir, "study-a.pdf").write_bytes(b"pdf-a")
+            Path(temp_dir, "study-b").write_bytes(b"dicom-b")
+            Path(temp_dir, "study-b.pdf").write_bytes(b"pdf-b")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            [
+                mock.call(
+                    study_id="study-a",
+                    pdf_path=str(Path(temp_dir, "study-a.pdf")),
+                    series_description="PDF report",
+                ),
+                mock.call(
+                    study_id="study-b",
+                    pdf_path=str(Path(temp_dir, "study-b.pdf")),
+                    series_description="PDF report",
+                ),
+            ],
+            api_client.studies.attach_pdf.call_args_list,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

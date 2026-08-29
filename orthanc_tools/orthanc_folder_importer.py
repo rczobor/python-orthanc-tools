@@ -347,28 +347,32 @@ class OrthancFolderImporter:
                 return 1
             if path.lower().endswith(".pdf"):
                 return 2
-            return 0
+            _, extension = os.path.splitext(path)
+            return 0 if extension.lower() in self._skip_extensions else 1
 
         path_entries = os.listdir(path=folder_path)
-        extensions_by_stem = {}
+        dicom_stems = set()
+        pdf_stems = set()
+        direct_priorities = {}
         for name in path_entries:
             path = os.path.join(folder_path, name)
             if os.path.isfile(path):
                 stem, extension = os.path.splitext(name.lower())
-                if extension in (".dcm", ".pdf"):
-                    extensions_by_stem.setdefault(stem, set()).add(extension)
-        paired_stems = {
-            stem
-            for stem, extensions in extensions_by_stem.items()
-            if extensions == {".dcm", ".pdf"}
-        }
+                priority = sort_priority(path)
+                direct_priorities[name] = priority
+                if extension == ".pdf":
+                    pdf_stems.add(stem)
+                elif priority == 1:
+                    dicom_stems.add(stem)
+        paired_stems = dicom_stems & pdf_stems
 
         def sort_key(name):
             stem, extension = os.path.splitext(name.lower())
-            if stem in paired_stems and extension in (".dcm", ".pdf"):
-                return (0, 0, stem, 0 if extension == ".dcm" else 1, name.lower())
+            priority = direct_priorities.get(name)
+            if stem in paired_stems and (extension == ".pdf" or priority == 1):
+                return (0, 0, stem, 0 if priority == 1 else 1, name.lower())
             path = os.path.join(folder_path, name)
-            return (1, sort_priority(path), "", 0, name.lower())
+            return (1, priority if priority is not None else sort_priority(path), "", 0, name.lower())
 
         path_entries = sorted(
             path_entries,
