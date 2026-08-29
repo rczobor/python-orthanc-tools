@@ -259,13 +259,39 @@ class OrthancFolderImporter:
                 else os.listdir(path_to_upload)
             )
             folder_errors = []
+            paired_archive_groups = (
+                self._paired_archive_groups(path_to_upload, path_entries)
+                if self._dicomize_pdf
+                else {}
+            )
+            processed_archive_groups = set()
             for path in path_entries:
                 full_path = os.path.join(path_to_upload, path)
                 try:
-                    study_id = self.upload_and_label(
-                        path_to_upload=full_path,
-                        study_orthanc_id=study_id,
-                    )
+                    archive_group = paired_archive_groups.get(path)
+                    if archive_group:
+                        if archive_group in processed_archive_groups:
+                            continue
+                        processed_archive_groups.add(archive_group)
+                        with tempfile.TemporaryDirectory() as temp_dir:
+                            for archive_name, priority in archive_group:
+                                role_dir = os.path.join(
+                                    temp_dir,
+                                    "images" if priority == 1 else "reports",
+                                )
+                                os.makedirs(role_dir, exist_ok=True)
+                                archive_path = os.path.join(path_to_upload, archive_name)
+                                with zipfile.ZipFile(archive_path, "r") as archive:
+                                    archive.extractall(role_dir)
+                            study_id = self.upload_and_label(
+                                path_to_upload=temp_dir,
+                                study_orthanc_id=study_id,
+                            )
+                    else:
+                        study_id = self.upload_and_label(
+                            path_to_upload=full_path,
+                            study_orthanc_id=study_id,
+                        )
                 except Exception as e:
                     logger.exception(f"Error while processing folder entry: {full_path}")
                     study_id = None
@@ -321,6 +347,43 @@ class OrthancFolderImporter:
                 self._messages.task_done()  # tell the queue the item has been processed
 
         logger.debug("Processing thread stopped")
+
+    def _paired_archive_groups(self, folder_path, path_entries):
+        def strip_role_suffix(stem):
+            for role in ("images", "reports", "image", "report", "dicom", "pdf"):
+                for separator in ("-", "_", ".", " "):
+                    suffix = f"{separator}{role}"
+                    if stem.endswith(suffix):
+                        return stem[:-len(suffix)]
+            return stem
+
+        groups = {}
+        for name in path_entries:
+            path = os.path.join(folder_path, name)
+            if not os.path.isfile(path) or not zipfile.is_zipfile(path):
+                continue
+            with zipfile.ZipFile(path, "r") as archive:
+                member_names = [
+                    member.filename.lower()
+                    for member in archive.infolist()
+                    if not member.is_dir()
+                ]
+            has_pdf = any(member.endswith(".pdf") for member in member_names)
+            has_dicom = any(not member.endswith(".pdf") for member in member_names)
+            if not has_pdf and not has_dicom:
+                continue
+            priority = 1 if has_dicom else 2
+            stem = os.path.splitext(os.path.basename(name.lower()))[0]
+            groups.setdefault(strip_role_suffix(stem), []).append((name, priority))
+
+        paired = {}
+        for entries in groups.values():
+            if {priority for _, priority in entries} != {1, 2}:
+                continue
+            archive_group = tuple(sorted(entries, key=lambda entry: (entry[1], entry[0])))
+            for name, _ in entries:
+                paired[name] = archive_group
+        return paired
 
     def _list_and_sort_dir(self, folder_path):
         def sort_priority(path):
