@@ -326,6 +326,35 @@ class TestWorklistFileSafety(unittest.TestCase):
                 os.listdir(temporary_dir),
             )
 
+    def test_metadata_fallback_rejects_destination_swap(self):
+        with tempfile.TemporaryDirectory() as parent_dir:
+            worklist_dir = os.path.join(parent_dir, "worklists")
+            os.mkdir(worklist_dir)
+            output_path = os.path.join(worklist_dir, "safe-accession.wl")
+            outside_path = os.path.join(parent_dir, "outside.wl")
+            Path(output_path).write_bytes(b"existing")
+            Path(outside_path).write_bytes(b"outside")
+            original_open = os.open
+
+            def swap_destination_before_open(path, flags, *args, **kwargs):
+                if Path(path) == Path(output_path):
+                    os.unlink(output_path)
+                    os.symlink(outside_path, output_path)
+                return original_open(path, flags, *args, **kwargs)
+
+            builder = DicomWorklistBuilder(folder=worklist_dir)
+            with mock.patch(
+                "orthanc_tools.hl7Lib.hl7_dicom_worklist_builder.os.chown",
+                side_effect=PermissionError("foreign owner"),
+            ), mock.patch(
+                "orthanc_tools.hl7Lib.hl7_dicom_worklist_builder.os.open",
+                side_effect=swap_destination_before_open,
+            ):
+                with self.assertRaisesRegex(ValueError, "destination changed"):
+                    builder.generate(self._values("safe-accession"))
+
+            self.assertEqual(b"outside", Path(outside_path).read_bytes())
+
     def test_explicit_symlink_updates_its_target(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             target_path = os.path.join(temporary_dir, "target.wl")
@@ -456,6 +485,39 @@ class TestWorklistFileSafety(unittest.TestCase):
                     builder.generate(self._values("archive/ACC"))
 
             self.assertFalse((outside_dir / "ACC.wl").exists())
+
+    def test_nested_automatic_destination_rejects_parent_swap_before_open(self):
+        with tempfile.TemporaryDirectory() as parent_dir:
+            worklist_dir = Path(parent_dir) / "worklists"
+            nested_dir = worklist_dir / "nested"
+            moved_dir = worklist_dir / "moved"
+            outside_dir = Path(parent_dir) / "outside"
+            nested_dir.mkdir(parents=True)
+            outside_dir.mkdir()
+            output_path = nested_dir / "ACC.wl"
+            outside_path = outside_dir / "ACC.wl"
+            DicomWorklistBuilder().generate(
+                self._values("nested/ACC"),
+                file_name=os.fspath(output_path),
+            )
+            outside_path.write_bytes(b"outside")
+            original_open = os.open
+
+            def swap_parent_before_open(path, flags, *args, **kwargs):
+                if Path(path) == output_path:
+                    nested_dir.rename(moved_dir)
+                    nested_dir.symlink_to(outside_dir, target_is_directory=True)
+                return original_open(path, flags, *args, **kwargs)
+
+            builder = DicomWorklistBuilder(folder=os.fspath(worklist_dir))
+            with mock.patch(
+                "orthanc_tools.hl7Lib.hl7_dicom_worklist_builder.os.open",
+                side_effect=swap_parent_before_open,
+            ):
+                with self.assertRaisesRegex(ValueError, "destination changed"):
+                    builder.generate(self._values("nested/ACC"))
+
+            self.assertEqual(b"outside", outside_path.read_bytes())
 
     def test_hard_linked_destination_updates_all_links(self):
         with tempfile.TemporaryDirectory() as temporary_dir:

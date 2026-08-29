@@ -14,6 +14,28 @@ from orthanc_api_client import OrthancApiClient
 
 _IS_WINDOWS = os.name == "nt"
 
+
+def _write_in_place(ds, output_path, expected_stat):
+    open_flags = os.O_WRONLY
+    if hasattr(os, "O_BINARY"):
+        open_flags |= os.O_BINARY
+    output_fd = os.open(output_path, open_flags)
+    try:
+        opened_stat = os.fstat(output_fd)
+        if (
+            opened_stat.st_dev != expected_stat.st_dev
+            or opened_stat.st_ino != expected_stat.st_ino
+        ):
+            raise ValueError("Worklist destination changed before it could be written")
+        with os.fdopen(output_fd, "wb") as output_file:
+            output_fd = None
+            output_file.truncate(0)
+            ds.save_as(output_file, enforce_file_format=True)
+    finally:
+        if output_fd is not None:
+            os.close(output_fd)
+
+
 class DicomElementType(Enum):
     MANDATORY = 1  # for dicom tags that must be there (type 1 or 1c) -> throw an exception if not present
     REQUIRED = 2  # for dicom tags that are mandatory but accepts null value (type 2 or 2c)
@@ -200,28 +222,18 @@ class DicomWorklistBuilder:
             output_stat = output_path.stat()
         except FileNotFoundError:
             output_stat = None
-        # Replacing an inode loses hard-link identity and Windows file-specific ACLs.
-        if output_stat is not None and (output_stat.st_nlink > 1 or _IS_WINDOWS):
-            open_flags = os.O_WRONLY
-            if hasattr(os, "O_BINARY"):
-                open_flags |= os.O_BINARY
-            output_fd = os.open(output_path, open_flags)
-            try:
-                opened_stat = os.fstat(output_fd)
-                if (
-                    opened_stat.st_dev != output_stat.st_dev
-                    or opened_stat.st_ino != output_stat.st_ino
-                ):
-                    raise ValueError(
-                        "Worklist destination changed before it could be written"
-                    )
-                with os.fdopen(output_fd, "wb") as output_file:
-                    output_fd = None
-                    output_file.truncate(0)
-                    ds.save_as(output_file, enforce_file_format=True)
-            finally:
-                if output_fd is not None:
-                    os.close(output_fd)
+        nested_automatic_destination = (
+            automatic_worklist_folder is not None
+            and output_path.parent != automatic_worklist_folder
+        )
+        # Replacing an inode loses hard links, Windows ACLs, and the validated
+        # identity of automatic destinations reached through subdirectories.
+        if output_stat is not None and (
+            output_stat.st_nlink > 1
+            or _IS_WINDOWS
+            or nested_automatic_destination
+        ):
+            _write_in_place(ds, output_path, output_stat)
             return file_name
 
         temp_file_name = os.fspath(
@@ -257,12 +269,17 @@ class DicomWorklistBuilder:
         except PermissionError:
             if temp_file_created and os.path.exists(temp_file_name):
                 os.unlink(temp_file_name)
-            ds.save_as(output_path, enforce_file_format=True)
+            if output_stat is None:
+                raise
+            _write_in_place(ds, output_path, output_stat)
         except OSError as ex:
             if temp_file_created and os.path.exists(temp_file_name):
                 os.unlink(temp_file_name)
-            if ex.errno in {errno.EBUSY, errno.EROFS, errno.ENOTSUP}:
-                ds.save_as(output_path, enforce_file_format=True)
+            if (
+                output_stat is not None
+                and ex.errno in {errno.EBUSY, errno.EROFS, errno.ENOTSUP}
+            ):
+                _write_in_place(ds, output_path, output_stat)
                 return file_name
             raise
         except Exception:
