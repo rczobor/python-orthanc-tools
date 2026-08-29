@@ -1,13 +1,13 @@
 import os
-import re
+import secrets
 import stat
-import tempfile
 import typing
 from pathlib import Path
 import pydicom
 from enum import Enum
 from typing import List, Union
 from pprint import pprint
+from urllib.parse import quote
 
 from orthanc_api_client import OrthancApiClient
 
@@ -129,7 +129,9 @@ class DicomWorklistBuilder:
 
         if file_name is None:  # if no filename provided, save in the folder
             accession_number = str(ds.AccessionNumber)
-            safe_accession_number = re.sub(r"[^A-Za-z0-9._-]+", "_", accession_number).strip(".")
+            safe_accession_number = quote(accession_number, safe="._-")
+            if safe_accession_number in {".", ".."}:
+                safe_accession_number = safe_accession_number.replace(".", "%2E")
             if not safe_accession_number:
                 raise ValueError("AccessionNumber cannot be converted to a safe worklist filename")
 
@@ -143,20 +145,22 @@ class DicomWorklistBuilder:
         try:
             output_mode = stat.S_IMODE(output_path.stat().st_mode)
         except FileNotFoundError:
-            output_mode = 0o644
+            output_mode = None
 
-        temp_file_descriptor, temp_file_name = tempfile.mkstemp(
-            dir=output_path.parent,
-            prefix=f".{output_path.name}.",
-            suffix=".tmp",
+        temp_file_name = os.fspath(
+            output_path.parent
+            / f".{output_path.name}.{secrets.token_hex(16)}.tmp"
         )
-        os.close(temp_file_descriptor)
+        temp_file_created = False
         try:
-            ds.save_as(temp_file_name, enforce_file_format=True)
-            os.chmod(temp_file_name, output_mode)
+            with open(temp_file_name, "xb") as temp_file:
+                temp_file_created = True
+                ds.save_as(temp_file, enforce_file_format=True)
+            if output_mode is not None:
+                os.chmod(temp_file_name, output_mode)
             os.replace(temp_file_name, output_path)
         except Exception:
-            if os.path.exists(temp_file_name):
+            if temp_file_created and os.path.exists(temp_file_name):
                 os.unlink(temp_file_name)
             raise
 

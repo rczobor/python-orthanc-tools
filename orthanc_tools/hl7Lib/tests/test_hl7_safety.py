@@ -170,6 +170,29 @@ class TestWorklistFileSafety(unittest.TestCase):
 
             self.assertEqual([], os.listdir(temporary_dir))
 
+    def test_sanitized_accession_numbers_do_not_collide(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            builder = DicomWorklistBuilder(folder=temporary_dir)
+
+            spaced_path = builder.generate(self._values("ABC 123"))
+            underscored_path = builder.generate(self._values("ABC_123"))
+
+            self.assertNotEqual(spaced_path, underscored_path)
+            self.assertTrue(os.path.isfile(spaced_path))
+            self.assertTrue(os.path.isfile(underscored_path))
+
+    @unittest.skipIf(os.name == "nt", "Windows does not preserve POSIX permission bits")
+    def test_new_worklist_respects_process_umask(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            previous_umask = os.umask(0o077)
+            try:
+                builder = DicomWorklistBuilder(folder=temporary_dir)
+                output_path = builder.generate(self._values("safe-accession"))
+            finally:
+                os.umask(previous_umask)
+
+            self.assertEqual(0o600, stat.S_IMODE(os.stat(output_path).st_mode))
+
     @unittest.skipIf(os.name == "nt", "Windows does not preserve POSIX permission bits")
     def test_replacing_worklist_preserves_existing_permissions(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
