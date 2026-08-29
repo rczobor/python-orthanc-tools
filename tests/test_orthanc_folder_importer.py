@@ -2,6 +2,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -40,6 +41,58 @@ class TestOrthancFolderImporter(unittest.TestCase):
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_zip_pdf_uses_uploaded_dicom_study(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-id"]
+        api_client.instances.get_parent_study_id.return_value = "study-id"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir, "study.zip")
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("image.dcm", b"dicom")
+                archive.writestr("report.pdf", b"pdf")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            returned_study_id = importer.upload_and_label(str(archive_path))
+
+        self.assertEqual("study-id", returned_study_id)
+        api_client.studies.attach_pdf.assert_called_once_with(
+            study_id="study-id",
+            pdf_path=mock.ANY,
+            series_description="PDF report",
+        )
+
+    def test_pdf_attachment_failure_is_retried_and_logged(self):
+        api_client = mock.Mock()
+        api_client.studies.attach_pdf.side_effect = RuntimeError("attach failed")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = Path(temp_dir, "report.pdf")
+            errors_path = Path(temp_dir, "errors.txt")
+            pdf_path.write_bytes(b"pdf")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=str(errors_path),
+                state_path=None,
+                max_retries=1,
+                dicomize_pdf=True,
+            )
+
+            with mock.patch("orthanc_tools.orthanc_folder_importer.time.sleep"):
+                importer.upload_and_label(str(pdf_path), study_orthanc_id="study-id")
+
+            self.assertEqual(f"{pdf_path}\n", errors_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(2, api_client.studies.attach_pdf.call_count)
 
 
 if __name__ == "__main__":

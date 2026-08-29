@@ -138,16 +138,11 @@ class OrthancFolderImporter:
                 with tempfile.TemporaryDirectory() as tempDir:
                     with zipfile.ZipFile(path_to_upload, 'r') as z:
                         z.extractall(tempDir)
-                    study_id = None
-                    for path in os.listdir(tempDir):
+                    study_id = study_orthanc_id
+                    for path in self._list_and_sort_dir(tempDir):
                         full_path = os.path.join(tempDir, path)
-                        study_id = self.upload_and_label(path_to_upload=full_path, study_orthanc_id=study_orthanc_id)
+                        study_id = self.upload_and_label(path_to_upload=full_path, study_orthanc_id=study_id)
                     return study_id
-
-            elif self._dicomize_pdf and path_to_upload.lower().endswith(".pdf"):
-
-                self._api_client.studies.attach_pdf(study_id=study_orthanc_id, pdf_path=path_to_upload, series_description="PDF report")
-                return study_orthanc_id
 
             else:
                 retry_count = 0
@@ -159,6 +154,14 @@ class OrthancFolderImporter:
                         logger.info(f"waiting {delay} seconds before retrying the upload of {path_to_upload}")
                         time.sleep(delay)
                     try:
+                        if self._dicomize_pdf and path_to_upload.lower().endswith(".pdf"):
+                            self._api_client.studies.attach_pdf(
+                                study_id=study_orthanc_id,
+                                pdf_path=path_to_upload,
+                                series_description="PDF report",
+                            )
+                            return study_orthanc_id
+
                         # here, we should have only files (and no zip file)
 
                         # let's modify/filter the file if needed
