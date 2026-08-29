@@ -130,6 +130,7 @@ class DicomWorklistBuilder:
 
         ds = self.customize(ds)
 
+        automatic_worklist_folder = None
         if file_name is None:  # if no filename provided, save in the folder
             filename_source = str(ds.AccessionNumber) or str(ds.SOPInstanceUID)
             safe_accession_number = quote(filename_source, safe="._-")
@@ -139,6 +140,7 @@ class DicomWorklistBuilder:
                 raise ValueError("AccessionNumber cannot be converted to a safe worklist filename")
 
             worklist_folder = Path(self._folder).resolve()
+            automatic_worklist_folder = worklist_folder
             encoded_output_path = worklist_folder / f"{safe_accession_number}.wl"
             try:
                 encoded_output_path.resolve().relative_to(worklist_folder)
@@ -188,6 +190,11 @@ class DicomWorklistBuilder:
         output_path = Path(file_name)
         if output_path.is_symlink():
             output_path = output_path.resolve()
+        if automatic_worklist_folder is not None:
+            try:
+                output_path.relative_to(automatic_worklist_folder)
+            except ValueError:
+                raise ValueError("Worklist path must remain inside the configured folder")
         try:
             output_stat = output_path.stat()
         except FileNotFoundError:

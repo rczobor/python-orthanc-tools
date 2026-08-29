@@ -386,6 +386,39 @@ class TestWorklistFileSafety(unittest.TestCase):
 
             self.assertEqual(b"existing", Path(target_path).read_bytes())
 
+    def test_automatic_symlink_swap_cannot_escape_worklist_folder(self):
+        with tempfile.TemporaryDirectory() as parent_dir:
+            worklist_dir = os.path.join(parent_dir, "worklists")
+            os.mkdir(worklist_dir)
+            inside_path = os.path.join(worklist_dir, "inside.wl")
+            outside_path = os.path.join(parent_dir, "outside.wl")
+            link_path = os.path.join(worklist_dir, "safe-accession.wl")
+            Path(inside_path).write_bytes(b"inside")
+            Path(outside_path).write_bytes(b"outside")
+            try:
+                os.symlink(inside_path, link_path)
+            except (OSError, NotImplementedError) as ex:
+                self.skipTest(f"symbolic links are unavailable: {ex}")
+
+            original_resolve = Path.resolve
+            link_resolutions = 0
+
+            def swap_link_before_second_resolution(path, *args, **kwargs):
+                nonlocal link_resolutions
+                if path == Path(link_path):
+                    link_resolutions += 1
+                    if link_resolutions == 2:
+                        os.unlink(link_path)
+                        os.symlink(outside_path, link_path)
+                return original_resolve(path, *args, **kwargs)
+
+            builder = DicomWorklistBuilder(folder=worklist_dir)
+            with mock.patch.object(Path, "resolve", swap_link_before_second_resolution):
+                with self.assertRaisesRegex(ValueError, "must remain inside"):
+                    builder.generate(self._values("safe-accession"))
+
+            self.assertEqual(b"outside", Path(outside_path).read_bytes())
+
     def test_hard_linked_destination_updates_all_links(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             output_path = os.path.join(temporary_dir, "safe-accession.wl")
