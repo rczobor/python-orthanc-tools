@@ -53,7 +53,7 @@ class OrthancFolderImporter:
                  dicomize_pdf: bool = False
                  ):
         self._api_client = api_client
-        self._folder_path = folder_path
+        self._folder_path = os.fspath(folder_path)
         self._labels_list = labels_list
         self._errors_path = errors_path # will contain the list of all the files path not correctly uploaded
         self._state_path = state_path # will contain the list of all the folders correctly uploaded
@@ -125,6 +125,8 @@ class OrthancFolderImporter:
         Then apply the labels on the study
         """
 
+        path_to_upload = os.fspath(path_to_upload)
+
         # file path case
         if os.path.isfile(path_to_upload):
             # check skip extensions
@@ -145,6 +147,7 @@ class OrthancFolderImporter:
                     return study_id
 
             else:
+                is_pdf = self._dicomize_pdf and path_to_upload.lower().endswith(".pdf")
                 retry_count = 0
                 retry_delays = [5, 20, 60, 300, 900, 1800, 3600, 7200]
 
@@ -154,7 +157,11 @@ class OrthancFolderImporter:
                         logger.info(f"waiting {delay} seconds before retrying the upload of {path_to_upload}")
                         time.sleep(delay)
                     try:
-                        if self._dicomize_pdf and path_to_upload.lower().endswith(".pdf"):
+                        if is_pdf:
+                            if study_orthanc_id is None:
+                                logger.error(f"No study available for PDF report: {path_to_upload}")
+                                self.add_file_name_in_errors_log(file_path=path_to_upload)
+                                return None
                             self._api_client.studies.attach_pdf(
                                 study_id=study_orthanc_id,
                                 pdf_path=path_to_upload,
@@ -188,7 +195,7 @@ class OrthancFolderImporter:
 
                             logger.error(f"File not uploaded (likely invalid DICOM): {path_to_upload}.")
                             self.add_file_name_in_errors_log(file_path=path_to_upload)
-                            return study_orthanc_id
+                            return None
 
                         study_id = study_orthanc_id
                         if self._dicomize_pdf or self._labels_list is not None:
@@ -226,7 +233,7 @@ class OrthancFolderImporter:
                             retry_count += 1
                             logger.warning(f"Error while uploading this file, retrying...: {path_to_upload}. Exception: {str(e)}")
 
-                return study_orthanc_id
+                return study_orthanc_id if is_pdf else None
 
         # folder case
         elif os.path.isdir(path_to_upload):
@@ -304,6 +311,13 @@ class OrthancFolderImporter:
                         file_name.endswith(".pdf") for file_name in lower_names
                     )
                 return 2 if contains_pdf else 0
+            if zipfile.is_zipfile(path):
+                with zipfile.ZipFile(path, "r") as archive:
+                    lower_names = [name.lower() for name in archive.namelist()]
+                if any(name.endswith(".dcm") for name in lower_names):
+                    return 1
+                if any(name.endswith(".pdf") for name in lower_names):
+                    return 2
             if name.lower().endswith(".dcm"):
                 return 1
             if name.lower().endswith(".pdf"):
