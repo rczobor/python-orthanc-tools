@@ -1,5 +1,6 @@
 import argparse
 import datetime
+import errno
 import logging
 import os
 import stat
@@ -174,6 +175,13 @@ class OrthancSyncher:
             if os.path.exists(temp_file_path):
                 os.unlink(temp_file_path)
             write_in_place()
+        except OSError as ex:
+            if os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
+            if ex.errno == errno.EBUSY:
+                write_in_place()
+                return
+            raise
         except Exception:
             if os.path.exists(temp_file_path):
                 os.unlink(temp_file_path)
@@ -259,7 +267,10 @@ class OrthancSyncher:
         index=0
         while True:
             if self._scheduler:
-                self._scheduler.wait_right_time_to_run()
+                waited = self._scheduler.wait_right_time_to_run()
+                if waited and index > 0:
+                    index = 0
+                    continue
 
             # Get a batch of studies
             studies = self.get_studies(orthanc_client=orthanc_source, batch_size=self._batch_size, index=index)

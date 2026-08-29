@@ -1,12 +1,28 @@
 import datetime
+import errno
 import os
 import stat
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
+from orthanc_tools.helpers.scheduler import Scheduler
 from orthanc_tools.orthanc_syncher import OrthancSyncher
+
+
+class TestSchedulerWaitResult(unittest.TestCase):
+    def test_reports_when_it_waited_for_a_running_period(self):
+        scheduler = Scheduler()
+        scheduler._running_periods.is_in_period = mock.Mock(
+            side_effect=[False, True]
+        )
+
+        with mock.patch("orthanc_tools.helpers.scheduler.time.sleep"):
+            waited = scheduler.wait_right_time_to_run()
+
+        self.assertTrue(waited)
 
 
 class TestOrthancSyncherSafety(unittest.TestCase):
@@ -42,6 +58,37 @@ class TestOrthancSyncherSafety(unittest.TestCase):
         )
 
         scheduler.wait_right_time_to_run.assert_called_once_with()
+
+    def test_scheduler_pause_restarts_offset_scan(self):
+        scheduler = mock.Mock()
+        scheduler.wait_right_time_to_run.side_effect = [False, True, False]
+        syncher = self._syncher(
+            scheduler=scheduler,
+            orthanc_queries_batch_size=1,
+        )
+        syncher.get_studies = mock.Mock(
+            side_effect=[
+                [
+                    SimpleNamespace(
+                        last_update=datetime.datetime(2026, 8, 3, 7, 8, 9),
+                        orthanc_id="study-id",
+                    )
+                ],
+                [],
+            ]
+        )
+        syncher.compare_studies = mock.Mock()
+
+        syncher.synch(
+            orthanc_source=mock.sentinel.source,
+            orthanc_destination=mock.sentinel.destination,
+            last_update_limit=datetime.datetime(2026, 8, 1, 1, 2, 3),
+        )
+
+        self.assertEqual(
+            [0, 0],
+            [call.kwargs["index"] for call in syncher.get_studies.call_args_list],
+        )
 
     def test_missing_status_file_is_initialized_atomically(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -137,6 +184,30 @@ class TestOrthancSyncherSafety(unittest.TestCase):
                 ["2026-08-03 07:08:09", "2026-08-02 04:05:06"],
                 status_target.read_text(encoding="utf-8").splitlines(),
             )
+
+    def test_busy_checkpoint_falls_back_to_in_place_update(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            status_path = Path(temp_dir, "status.txt")
+            status_path.write_text(
+                "2026-08-01 01:02:03\n2026-08-02 04:05:06\n",
+                encoding="utf-8",
+            )
+            syncher = self._syncher(persist_status_path=os.fspath(status_path))
+
+            with mock.patch(
+                "orthanc_tools.orthanc_syncher.os.replace",
+                side_effect=OSError(errno.EBUSY, "bind-mounted file"),
+            ):
+                syncher.save_last_update_limit(
+                    datetime.datetime(2026, 8, 3, 7, 8, 9),
+                    0,
+                )
+
+            self.assertEqual(
+                ["2026-08-03 07:08:09", "2026-08-02 04:05:06"],
+                status_path.read_text(encoding="utf-8").splitlines(),
+            )
+            self.assertEqual(["status.txt"], os.listdir(temp_dir))
 
     def test_empty_transfer_is_a_no_op(self):
         source = mock.MagicMock()
