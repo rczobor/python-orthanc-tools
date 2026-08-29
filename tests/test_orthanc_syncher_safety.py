@@ -106,6 +106,41 @@ class TestOrthancSyncherSafety(unittest.TestCase):
             )
             self.assertEqual(["status.txt"], os.listdir(temp_dir))
 
+    @unittest.skipIf(os.name == "nt", "Windows does not preserve POSIX modes")
+    def test_new_status_file_respects_process_umask(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            status_path = os.path.join(temp_dir, "status.txt")
+            previous_umask = os.umask(0o027)
+            try:
+                self._syncher(persist_status_path=status_path)
+            finally:
+                os.umask(previous_umask)
+
+            self.assertEqual(0o640, stat.S_IMODE(os.stat(status_path).st_mode))
+
+    @unittest.skipIf(os.name == "nt", "directory fsync is POSIX-specific")
+    def test_atomic_status_update_fsyncs_parent_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            status_path = Path(temp_dir, "status.txt")
+            status_path.write_text(
+                "2026-08-01 01:02:03\n2026-08-02 04:05:06\n",
+                encoding="utf-8",
+            )
+            syncher = self._syncher(persist_status_path=os.fspath(status_path))
+
+            with (
+                mock.patch("orthanc_tools.orthanc_syncher.os.open", return_value=123),
+                mock.patch("orthanc_tools.orthanc_syncher.os.fsync") as fsync,
+                mock.patch("orthanc_tools.orthanc_syncher.os.close") as close,
+            ):
+                syncher.save_last_update_limit(
+                    datetime.datetime(2026, 8, 3, 7, 8, 9),
+                    0,
+                )
+
+            fsync.assert_any_call(123)
+            close.assert_called_once_with(123)
+
     def test_invalid_status_file_is_preserved_and_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             status_path = Path(temp_dir, "status.txt")
@@ -208,6 +243,36 @@ class TestOrthancSyncherSafety(unittest.TestCase):
                 status_path.read_text(encoding="utf-8").splitlines(),
             )
             self.assertEqual(["status.txt"], os.listdir(temp_dir))
+
+    def test_read_only_parent_falls_back_to_in_place_update(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            status_path = Path(temp_dir, "status.txt")
+            status_path.write_text(
+                "2026-08-01 01:02:03\n2026-08-02 04:05:06\n",
+                encoding="utf-8",
+            )
+            syncher = self._syncher(persist_status_path=os.fspath(status_path))
+            real_open = open
+
+            def open_with_read_only_parent(path, mode="r", *args, **kwargs):
+                if mode == "x":
+                    raise OSError(errno.EROFS, "read-only parent")
+                return real_open(path, mode, *args, **kwargs)
+
+            with mock.patch(
+                "orthanc_tools.orthanc_syncher.open",
+                side_effect=open_with_read_only_parent,
+                create=True,
+            ):
+                syncher.save_last_update_limit(
+                    datetime.datetime(2026, 8, 3, 7, 8, 9),
+                    0,
+                )
+
+            self.assertEqual(
+                ["2026-08-03 07:08:09", "2026-08-02 04:05:06"],
+                status_path.read_text(encoding="utf-8").splitlines(),
+            )
 
     def test_hard_linked_checkpoint_updates_all_links(self):
         with tempfile.TemporaryDirectory() as temp_dir:

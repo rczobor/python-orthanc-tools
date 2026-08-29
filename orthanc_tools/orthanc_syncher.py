@@ -3,8 +3,8 @@ import datetime
 import errno
 import logging
 import os
+import secrets
 import stat
-import tempfile
 import time
 from typing import List
 
@@ -140,19 +140,12 @@ class OrthancSyncher:
             write_in_place()
             return
 
+        temp_file_path = os.path.join(
+            status_folder,
+            f".{os.path.basename(status_path)}.{secrets.token_hex(16)}.tmp",
+        )
         try:
-            temp_file_descriptor, temp_file_path = tempfile.mkstemp(
-                dir=status_folder,
-                prefix=f".{os.path.basename(status_path)}.",
-                suffix=".tmp",
-                text=True,
-            )
-        except PermissionError:
-            write_in_place()
-            return
-
-        try:
-            with os.fdopen(temp_file_descriptor, "w") as status_file:
+            with open(temp_file_path, "x") as status_file:
                 status_file.writelines(status_lines)
                 status_file.flush()
                 os.fsync(status_file.fileno())
@@ -181,6 +174,16 @@ class OrthancSyncher:
                             os.getxattr(status_path, attribute_name),
                         )
             os.replace(temp_file_path, status_path)
+            if os.name != "nt":
+                directory_fd = os.open(status_folder, os.O_RDONLY)
+                try:
+                    try:
+                        os.fsync(directory_fd)
+                    except OSError as ex:
+                        if ex.errno not in {errno.EINVAL, errno.ENOTSUP}:
+                            raise
+                finally:
+                    os.close(directory_fd)
         except PermissionError:
             if os.path.exists(temp_file_path):
                 os.unlink(temp_file_path)
@@ -188,7 +191,7 @@ class OrthancSyncher:
         except OSError as ex:
             if os.path.exists(temp_file_path):
                 os.unlink(temp_file_path)
-            if ex.errno == errno.EBUSY:
+            if ex.errno in {errno.EBUSY, errno.EROFS, errno.ENOTSUP}:
                 write_in_place()
                 return
             raise
