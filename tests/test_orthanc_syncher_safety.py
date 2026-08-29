@@ -141,6 +141,55 @@ class TestOrthancSyncherSafety(unittest.TestCase):
             fsync.assert_any_call(123)
             close.assert_called_once_with(123)
 
+    @unittest.skipIf(os.name == "nt", "metadata durability test is POSIX-specific")
+    def test_status_metadata_is_fsynced_before_replacement(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            status_path = Path(temp_dir, "status.txt")
+            status_path.write_text(
+                "2026-08-01 01:02:03\n2026-08-02 04:05:06\n",
+                encoding="utf-8",
+            )
+            syncher = self._syncher(persist_status_path=os.fspath(status_path))
+            events = []
+            original_chmod = os.chmod
+            original_fsync = os.fsync
+            original_replace = os.replace
+
+            def record_chmod(*args, **kwargs):
+                events.append("metadata")
+                return original_chmod(*args, **kwargs)
+
+            def record_fsync(*args, **kwargs):
+                events.append("fsync")
+                return original_fsync(*args, **kwargs)
+
+            def record_replace(*args, **kwargs):
+                events.append("replace")
+                return original_replace(*args, **kwargs)
+
+            with (
+                mock.patch(
+                    "orthanc_tools.orthanc_syncher.os.chmod",
+                    side_effect=record_chmod,
+                ),
+                mock.patch(
+                    "orthanc_tools.orthanc_syncher.os.fsync",
+                    side_effect=record_fsync,
+                ),
+                mock.patch(
+                    "orthanc_tools.orthanc_syncher.os.replace",
+                    side_effect=record_replace,
+                ),
+            ):
+                syncher.save_last_update_limit(
+                    datetime.datetime(2026, 8, 3, 7, 8, 9),
+                    0,
+                )
+
+            metadata_index = events.index("metadata")
+            replace_index = events.index("replace")
+            self.assertIn("fsync", events[metadata_index + 1:replace_index])
+
     def test_invalid_status_file_is_preserved_and_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             status_path = Path(temp_dir, "status.txt")

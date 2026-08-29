@@ -149,30 +149,31 @@ class OrthancSyncher:
                 status_file.writelines(status_lines)
                 status_file.flush()
                 os.fsync(status_file.fileno())
-            if status_metadata is not None:
-                if hasattr(os, "chown"):
-                    os.chown(
-                        temp_file_path,
-                        status_metadata.st_uid,
-                        status_metadata.st_gid,
-                    )
-                os.chmod(temp_file_path, stat.S_IMODE(status_metadata.st_mode))
-                if all(
-                    hasattr(os, name)
-                    for name in ("listxattr", "getxattr", "setxattr")
-                ):
-                    try:
-                        attribute_names = os.listxattr(status_path)
-                    except OSError as ex:
-                        if ex.errno != errno.ENOTSUP:
-                            raise
-                        attribute_names = []
-                    for attribute_name in attribute_names:
-                        os.setxattr(
+                if status_metadata is not None:
+                    if hasattr(os, "chown"):
+                        os.chown(
                             temp_file_path,
-                            attribute_name,
-                            os.getxattr(status_path, attribute_name),
+                            status_metadata.st_uid,
+                            status_metadata.st_gid,
                         )
+                    os.chmod(temp_file_path, stat.S_IMODE(status_metadata.st_mode))
+                    if all(
+                        hasattr(os, name)
+                        for name in ("listxattr", "getxattr", "setxattr")
+                    ):
+                        try:
+                            attribute_names = os.listxattr(status_path)
+                        except OSError as ex:
+                            if ex.errno != errno.ENOTSUP:
+                                raise
+                            attribute_names = []
+                        for attribute_name in attribute_names:
+                            os.setxattr(
+                                temp_file_path,
+                                attribute_name,
+                                os.getxattr(status_path, attribute_name),
+                            )
+                    os.fsync(status_file.fileno())
             os.replace(temp_file_path, status_path)
             if os.name != "nt":
                 directory_fd = os.open(status_folder, os.O_RDONLY)
