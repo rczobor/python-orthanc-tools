@@ -47,7 +47,8 @@ class OrthancFolderImporter:
                  labels_list: List[str] = None,
                  max_retries: int = 8,
                  worker_threads_count: int = multiprocessing.cpu_count() - 1,  # by default, use all CPUs but one for compression
-                 skip_extensions: List[str] = None
+                 skip_extensions: List[str] = None,
+                 dicomize_pdf: bool = False
                  ):
         self._api_client = api_client
         self._folder_path = folder_path
@@ -67,6 +68,7 @@ class OrthancFolderImporter:
         else:
             self._max_retries = max_retries
 
+        self._dicomize_pdf = dicomize_pdf
         self._lock = threading.Lock()
         self._orthanc_lock = threading.Lock()
         self._next_orthanc_reconnect_attempt = 0
@@ -112,9 +114,9 @@ class OrthancFolderImporter:
         if self._state_path:
             with self._lock:
                 with open(self._state_path, "at") as f:
-                    f.write(folder_path + "\n")
+                    f.write(str(folder_path) + "\n")
 
-    def upload_and_label(self, path_to_upload):
+    def upload_and_label(self, path_to_upload, study_orthanc_id=None):
         """
         Upload the file if path_to_upload is a file path
         Recursively upload the content of the folder is path_to_upload is a folder path
@@ -130,13 +132,21 @@ class OrthancFolderImporter:
                 return
 
             # zip file case
-            if "zip" in path_to_upload and zipfile.is_zipfile(path_to_upload):
+            if path_to_upload.lower().endswith("zip") and zipfile.is_zipfile(path_to_upload):
                 with tempfile.TemporaryDirectory() as tempDir:
                     with zipfile.ZipFile(path_to_upload, 'r') as z:
                         z.extractall(tempDir)
+                    study_id = None
                     for path in os.listdir(tempDir):
                         full_path = os.path.join(tempDir, path)
-                        self.upload_and_label(path_to_upload=full_path)
+                        study_id = self.upload_and_label(path_to_upload=full_path, study_orthanc_id=study_orthanc_id)
+                    return study_id
+
+            elif self._dicomize_pdf and path_to_upload.lower().endswith(".pdf"):
+
+                self._api_client.studies.attach_pdf(study_id=study_orthanc_id, pdf_path=path_to_upload, series_description="PDF report")
+                return study_orthanc_id
+
             else:
                 retry_count = 0
                 retry_delays = [5, 20, 60, 300, 900, 1800, 3600, 7200]
@@ -157,11 +167,14 @@ class OrthancFolderImporter:
                         # filtering out case
                         if buffer is None:
                             logger.debug(f"File {path_to_upload} has been filtered out.")
-                            return
+                            return study_orthanc_id
 
                         # modification case: let's upload the file
                         logger.info(f"uploading {path_to_upload}")
                         instance_orthanc_ids = self._api_client.upload(buffer, ignore_errors=True)
+
+                        ## get the study_orthanc_id
+                        study_id = self._api_client.instances.get_parent_study_id(instance_orthanc_ids[0])
 
                         if len(instance_orthanc_ids) == 0:
                             # If we got nothing back, it might be a file error OR Orthanc is actually down
@@ -173,12 +186,14 @@ class OrthancFolderImporter:
 
                             logger.error(f"File not uploaded (likely invalid DICOM): {path_to_upload}.")
                             self.add_file_name_in_errors_log(file_path=path_to_upload)
-                            break
+                            return study_orthanc_id
+
                         # we label for each instance, not at the end of the study, so that there is never an unlabeled image in Orthanc
                         if self._labels_list is not None:
-                            study_orthanc_id = self._api_client.instances.get_parent_study_id(instance_orthanc_ids[0])
-                            self._api_client.studies.add_labels(orthanc_id=study_orthanc_id, labels=self._labels_list)
-                        break
+                            self._api_client.studies.add_labels(orthanc_id=study_id, labels=self._labels_list)
+
+                        return study_id
+
                     except (exceptions.ConnectionError, exceptions.OrthancApiException) as e:
                         # Handle connection issues without consuming retry count
                         if not self._api_client.is_alive():
@@ -204,20 +219,36 @@ class OrthancFolderImporter:
                         else:
                             retry_count += 1
                             logger.warning(f"Error while uploading this file, retrying...: {path_to_upload}. Exception: {str(e)}")
+
+                return study_orthanc_id
+
         # folder case
         elif os.path.isdir(path_to_upload):
             # this folder could have been processed in a previous run of the script
             if path_to_upload in self._folders_uploaded:
                 logger.info(f"Folder {path_to_upload} already processed, skipping...")
-                return
+                return study_orthanc_id
+
+            ## list dir and check if there is folders or files in this path
+            ## if files only:
+            ##  sort them (pdf at the end)
+            ## process them
+
+            study_id = None
+            path_entries = self._list_and_sort_dir(path_to_upload)
+            for path in path_entries:
+                full_path = os.path.join(path_to_upload, path)
+                study_id = self.upload_and_label(path_to_upload=full_path, study_orthanc_id=study_id)
 
             # let's process this folder
-            for path in os.listdir(path_to_upload):
-                full_path = os.path.join(path_to_upload, path)
-                self.upload_and_label(path_to_upload=full_path)
+            # for path in os.listdir(path_to_upload):
+            #     full_path = os.path.join(path_to_upload, path)
+            #     ## manage id (get and repush)
+            #     self.upload_and_label(path_to_upload=full_path)
 
             # let's add this folder path in the processed ones:
             self.add_folder_path_in_state_file(path_to_upload)
+            return study_id
 
     def process_dicom_file(self, file_content: bytes) -> bytes:
         '''
@@ -249,6 +280,35 @@ class OrthancFolderImporter:
 
         logger.debug("Processing thread stopped")
 
+    def _list_and_sort_dir(self, folder_path):
+        path_entries = sorted(
+            os.listdir(path=folder_path),
+            key=lambda name: (
+                2 if name.lower().endswith(".pdf")
+                else 1 if name.lower().endswith(".dcm")
+                else 0,
+                name.lower()
+            )
+        )
+
+
+        return path_entries
+
+    def _is_folder_containing_folders_only(self, folder_path):
+        '''
+        Will return True if there are only subfolders in the considered folder
+        Else: False
+        NB: is there are files which are not importable (different from pdf/dcm)
+        they are ignored.
+        '''
+        for path in os.listdir(path=folder_path):
+            full_path = os.path.join(self._folder_path, path)
+            if os.path.isfile(full_path) and full_path.lower().endswith((".pdf", ".dcm")):
+                return False
+
+        return True
+
+
     def execute(self):
         # read state
         if self._state_path and os.path.isfile(self._state_path):
@@ -269,9 +329,16 @@ class OrthancFolderImporter:
             wt.start()
 
         # let's browse the main folder to feed the message queue
-        for path in os.listdir(path=self._folder_path):
-            full_path = os.path.join(self._folder_path, path)
-            self._messages.put(full_path) # if the queue is full, this will block until there's a free slot
+
+        # if there are subfolders only, we will benefit from the multithreading
+        if self._is_folder_containing_folders_only(self._folder_path):
+            for path in os.listdir(path=self._folder_path):
+                full_path = os.path.join(self._folder_path, path)
+                self._messages.put(full_path) # if the queue is full, this will block until there's a free slot
+
+        # if there are files, we won't (so that pdf can be handled)
+        else:
+            self._messages.put(self._folder_path)
 
         # let's wait for the completion of all threads
         self.stop()
@@ -303,6 +370,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_retries', type=int, default=8, help='Maximum number of attempts for a file upload.')
     parser.add_argument('--worker_threads_count', type=int, default=1, help='Worker threads count')
     parser.add_argument('--skip_extensions', type=str, default=None, help='List of extensions to skip, separated by a comma.')
+    parser.add_argument('--dicomize_pdf', type=bool, default=False, action='store_true', help='If true, pdf files found will be dicomized and uploaded.')
 
     args = parser.parse_args()
 
@@ -326,6 +394,11 @@ if __name__ == '__main__':
     else:
         skip_extensions = []
 
+    if os.environ.get("DICOMIZE_PDF", None) is not None:
+        dicomize_pdf = os.environ.get("DICOMIZE_PDF") in ["true", "True"]
+    else:
+        dicomize_pdf = args.dicomize_pdf
+
     o = None
     if api_key is not None:
         o=OrthancApiClient(url, headers={"api-key": api_key}, pool_maxsize=max(10, worker_threads_count), pool_block=True)
@@ -340,7 +413,8 @@ if __name__ == '__main__':
         state_path=state_path,
         max_retries=max_retries,
         worker_threads_count=worker_threads_count,
-        skip_extensions=skip_extensions
+        skip_extensions=skip_extensions,
+        dicomize_pdf=dicomize_pdf
     )
 
     importer.execute()
