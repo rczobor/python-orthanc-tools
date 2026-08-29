@@ -358,7 +358,7 @@ class OrthancFolderImporter:
 
     @staticmethod
     def _strip_role_suffix(stem):
-        for role in ("images", "reports", "image", "report", "dicom", "pdf"):
+        for role in ("images", "reports", "image", "report", "dicom", "pdfs", "pdf"):
             for separator in ("-", "_", ".", " "):
                 suffix = f"{separator}{role}"
                 if stem.endswith(suffix):
@@ -442,7 +442,7 @@ class OrthancFolderImporter:
 
         path_entries = os.listdir(path=folder_path)
         image_roles = {"image", "images", "dicom"}
-        report_roles = {"report", "reports", "pdf"}
+        report_roles = {"report", "reports", "pdf", "pdfs"}
         centralized_image_dirs = {
             name
             for name in path_entries
