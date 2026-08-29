@@ -122,8 +122,12 @@ class PostgresDumper:
             if sftp is not None and temporary_file_path is not None:
                 try:
                     sftp.remove(temporary_file_path)
-                except OSError:
-                    pass
+                except Exception:
+                    logger.warning(
+                        "Could not remove partial backup %s",
+                        temporary_file_path,
+                        exc_info=True,
+                    )
             logger.exception("PostgreSQL backup failed")
             raise
         finally:

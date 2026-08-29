@@ -154,6 +154,27 @@ class TestPostgresDumper(unittest.TestCase):
         temporary_path = self.sftp.open.call_args.args[0]
         self.sftp.remove.assert_called_once_with(temporary_path)
 
+    def test_cleanup_failure_does_not_mask_backup_error(self):
+        self.sftp.remove.side_effect = EOFError("connection dropped")
+
+        with mock.patch(
+            "orthanc_tools.postgres_dumper.subprocess.Popen",
+            side_effect=self._popen(
+                b"incomplete",
+                return_code=1,
+                stderr=b"permission denied",
+            ),
+        ):
+            with self.assertLogs(
+                "orthanc_tools.postgres_dumper",
+                level="ERROR",
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "pg_dump failed with exit code 1: permission denied",
+                ):
+                    self.dumper.stream_pg_dump_to_sftp()
+
     def test_connection_error_is_not_masked_by_cleanup(self):
         self.transport_patch.stop()
 
