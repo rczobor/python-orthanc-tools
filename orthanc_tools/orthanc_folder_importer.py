@@ -543,6 +543,10 @@ class OrthancFolderImporter:
                 lines = file.readlines()
                 self._folders_uploaded = [line.strip() for line in lines]
 
+        if self._folder_path in self._folders_uploaded:
+            logger.info(f"Skipping folder already uploaded: {self._folder_path}")
+            return
+
         # create worker threads
         for thread_id in range(0, self._worker_threads_count):
             self._worker_threads.append(threading.Thread(
@@ -557,8 +561,15 @@ class OrthancFolderImporter:
 
         # let's browse the main folder to feed the message queue
 
+        checkpoint_root = False
         if not self._dicomize_pdf:
-            for path in os.listdir(path=self._folder_path):
+            paths = os.listdir(path=self._folder_path)
+            checkpoint_root = any(
+                os.path.isfile(os.path.join(self._folder_path, path))
+                and os.path.splitext(path)[1].lower() not in self._skip_extensions
+                for path in paths
+            )
+            for path in paths:
                 full_path = os.path.join(self._folder_path, path)
                 self._messages.put(full_path) # if the queue is full, this will block until there's a free slot
 
@@ -573,6 +584,9 @@ class OrthancFolderImporter:
         if self._worker_errors:
             path, error = self._worker_errors[0]
             raise RuntimeError(f"Importer worker failed while processing {path}") from error
+
+        if checkpoint_root:
+            self.add_folder_path_in_state_file(self._folder_path)
 
         logger.info("End of upload!")
 

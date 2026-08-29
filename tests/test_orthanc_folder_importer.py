@@ -830,6 +830,33 @@ class TestOrthancFolderImporter(unittest.TestCase):
             [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
         )
 
+    def test_pdf_off_mixed_root_is_checkpointed_after_children(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-id"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_dir = Path(temp_dir, "input")
+            child_dir = Path(input_dir, "child")
+            child_dir.mkdir(parents=True)
+            Path(input_dir, "root.dcm").write_bytes(b"dicom")
+            Path(child_dir, "child.dcm").write_bytes(b"dicom")
+            state_path = Path(temp_dir, "state.txt")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=input_dir,
+                errors_path=None,
+                state_path=str(state_path),
+                max_retries=0,
+                worker_threads_count=2,
+            )
+
+            importer.execute()
+
+            self.assertCountEqual(
+                [str(input_dir), str(child_dir)],
+                state_path.read_text(encoding="utf-8").splitlines(),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
