@@ -491,6 +491,39 @@ class TestWorklistFileSafety(unittest.TestCase):
             self.assertEqual(original_inode, os.stat(output_path).st_ino)
             self.assertEqual("patient", pydicom.dcmread(output_path).PatientID)
 
+    def test_in_place_write_rejects_destination_swap(self):
+        with tempfile.TemporaryDirectory() as parent_dir:
+            worklist_dir = os.path.join(parent_dir, "worklists")
+            os.mkdir(worklist_dir)
+            output_path = os.path.join(worklist_dir, "safe-accession.wl")
+            linked_path = os.path.join(worklist_dir, "linked.wl")
+            outside_path = os.path.join(parent_dir, "outside.wl")
+            Path(output_path).write_bytes(b"existing")
+            Path(outside_path).write_bytes(b"outside")
+            try:
+                os.link(output_path, linked_path)
+            except (OSError, NotImplementedError) as ex:
+                self.skipTest(f"hard links are unavailable: {ex}")
+
+            original_open = os.open
+
+            def swap_destination_before_open(path, flags, *args, **kwargs):
+                if Path(path) == Path(output_path):
+                    os.unlink(output_path)
+                    os.symlink(outside_path, output_path)
+                return original_open(path, flags, *args, **kwargs)
+
+            builder = DicomWorklistBuilder(folder=worklist_dir)
+            with mock.patch(
+                "orthanc_tools.hl7Lib.hl7_dicom_worklist_builder.os.open",
+                side_effect=swap_destination_before_open,
+            ):
+                with self.assertRaisesRegex(ValueError, "destination changed"):
+                    builder.generate(self._values("safe-accession"))
+
+            self.assertEqual(b"outside", Path(outside_path).read_bytes())
+            self.assertEqual(b"existing", Path(linked_path).read_bytes())
+
     @unittest.skipUnless(
         all(hasattr(os, name) for name in ("listxattr", "getxattr", "setxattr")),
         "extended attributes are unavailable",

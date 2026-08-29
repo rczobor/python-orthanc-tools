@@ -202,7 +202,26 @@ class DicomWorklistBuilder:
             output_stat = None
         # Replacing an inode loses hard-link identity and Windows file-specific ACLs.
         if output_stat is not None and (output_stat.st_nlink > 1 or _IS_WINDOWS):
-            ds.save_as(output_path, enforce_file_format=True)
+            open_flags = os.O_WRONLY
+            if hasattr(os, "O_BINARY"):
+                open_flags |= os.O_BINARY
+            output_fd = os.open(output_path, open_flags)
+            try:
+                opened_stat = os.fstat(output_fd)
+                if (
+                    opened_stat.st_dev != output_stat.st_dev
+                    or opened_stat.st_ino != output_stat.st_ino
+                ):
+                    raise ValueError(
+                        "Worklist destination changed before it could be written"
+                    )
+                with os.fdopen(output_fd, "wb") as output_file:
+                    output_fd = None
+                    output_file.truncate(0)
+                    ds.save_as(output_file, enforce_file_format=True)
+            finally:
+                if output_fd is not None:
+                    os.close(output_fd)
             return file_name
 
         temp_file_name = os.fspath(
