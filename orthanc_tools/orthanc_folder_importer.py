@@ -131,7 +131,7 @@ class OrthancFolderImporter:
             _, ext = os.path.splitext(path_to_upload)
             if ext.lower() in self._skip_extensions:
                 logger.info(f"Skipping file with extension {ext}: {path_to_upload}")
-                return
+                return study_orthanc_id
 
             # zip file case
             if path_to_upload.lower().endswith("zip") and zipfile.is_zipfile(path_to_upload):
@@ -345,8 +345,12 @@ class OrthancFolderImporter:
 
         # let's browse the main folder to feed the message queue
 
-        # if there are subfolders only, we will benefit from the multithreading
-        if self._is_folder_containing_folders_only(self._folder_path):
+        # PDF reports may live in a sibling folder and need the study ID produced
+        # by an earlier DICOM upload, so keep the root traversal on one worker.
+        if (
+            not self._dicomize_pdf
+            and self._is_folder_containing_folders_only(self._folder_path)
+        ):
             for path in os.listdir(path=self._folder_path):
                 full_path = os.path.join(self._folder_path, path)
                 self._messages.put(full_path) # if the queue is full, this will block until there's a free slot
