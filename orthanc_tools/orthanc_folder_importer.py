@@ -9,6 +9,8 @@ import multiprocessing
 import queue
 import threading
 
+from orthanc_tools.helpers.environment import get_env_bool
+
 # examples:
 # python orthanc_tools/orthanc_folder_importer.py --folder=./tests/stimuli --url=http://192.168.0.10:8042 --user=user --password=pwd --skip=.txt,.ini
 
@@ -173,10 +175,7 @@ class OrthancFolderImporter:
                         logger.info(f"uploading {path_to_upload}")
                         instance_orthanc_ids = self._api_client.upload(buffer, ignore_errors=True)
 
-                        ## get the study_orthanc_id
-                        study_id = self._api_client.instances.get_parent_study_id(instance_orthanc_ids[0])
-
-                        if len(instance_orthanc_ids) == 0:
+                        if not instance_orthanc_ids:
                             # If we got nothing back, it might be a file error OR Orthanc is actually down
                             # and the ignore_errors=True swallowed a connection error.
                             if not self._api_client.is_alive():
@@ -187,6 +186,8 @@ class OrthancFolderImporter:
                             logger.error(f"File not uploaded (likely invalid DICOM): {path_to_upload}.")
                             self.add_file_name_in_errors_log(file_path=path_to_upload)
                             return study_orthanc_id
+
+                        study_id = self._api_client.instances.get_parent_study_id(instance_orthanc_ids[0])
 
                         # we label for each instance, not at the end of the study, so that there is never an unlabeled image in Orthanc
                         if self._labels_list is not None:
@@ -370,7 +371,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_retries', type=int, default=8, help='Maximum number of attempts for a file upload.')
     parser.add_argument('--worker_threads_count', type=int, default=1, help='Worker threads count')
     parser.add_argument('--skip_extensions', type=str, default=None, help='List of extensions to skip, separated by a comma.')
-    parser.add_argument('--dicomize_pdf', type=bool, default=False, action='store_true', help='If true, pdf files found will be dicomized and uploaded.')
+    parser.add_argument('--dicomize_pdf', default=False, action='store_true', help='If true, pdf files found will be dicomized and uploaded.')
 
     args = parser.parse_args()
 
@@ -394,10 +395,7 @@ if __name__ == '__main__':
     else:
         skip_extensions = []
 
-    if os.environ.get("DICOMIZE_PDF", None) is not None:
-        dicomize_pdf = os.environ.get("DICOMIZE_PDF") in ["true", "True"]
-    else:
-        dicomize_pdf = args.dicomize_pdf
+    dicomize_pdf = get_env_bool("DICOMIZE_PDF", args.dicomize_pdf)
 
     o = None
     if api_key is not None:
