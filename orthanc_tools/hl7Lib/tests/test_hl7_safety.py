@@ -548,6 +548,42 @@ class TestWorklistFileSafety(unittest.TestCase):
 
             self.assertEqual(b"outside", outside_path.read_bytes())
 
+    def test_automatic_destination_rejects_symlink_swap_before_stat(self):
+        with tempfile.TemporaryDirectory() as parent_dir:
+            worklist_dir = Path(parent_dir) / "worklists"
+            nested_dir = worklist_dir / "nested"
+            nested_dir.mkdir(parents=True)
+            output_path = nested_dir / "ACC.wl"
+            outside_path = Path(parent_dir) / "outside.wl"
+            DicomWorklistBuilder().generate(
+                self._values("nested/ACC"),
+                file_name=os.fspath(output_path),
+            )
+            outside_path.write_bytes(b"outside")
+            original_resolve = Path.resolve
+            output_resolutions = 0
+
+            def swap_destination_after_second_resolution(path, *args, **kwargs):
+                nonlocal output_resolutions
+                resolved_path = original_resolve(path, *args, **kwargs)
+                if path == output_path:
+                    output_resolutions += 1
+                    if output_resolutions == 2:
+                        output_path.unlink()
+                        output_path.symlink_to(outside_path)
+                return resolved_path
+
+            builder = DicomWorklistBuilder(folder=os.fspath(worklist_dir))
+            with mock.patch.object(
+                Path,
+                "resolve",
+                swap_destination_after_second_resolution,
+            ):
+                with self.assertRaisesRegex(ValueError, "symbolic link"):
+                    builder.generate(self._values("nested/ACC"))
+
+            self.assertEqual(b"outside", outside_path.read_bytes())
+
     def test_hard_linked_destination_updates_all_links(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             output_path = os.path.join(temporary_dir, "safe-accession.wl")

@@ -231,9 +231,11 @@ class DicomWorklistBuilder:
         elif output_path.is_symlink():
             output_path = output_path.resolve()
         try:
-            output_stat = output_path.stat()
+            output_stat = output_path.lstat()
         except FileNotFoundError:
             output_stat = None
+        if output_stat is not None and stat.S_ISLNK(output_stat.st_mode):
+            raise ValueError("Worklist destination changed to a symbolic link")
         nested_automatic_destination = (
             automatic_worklist_folder is not None
             and output_path.parent != automatic_worklist_folder
