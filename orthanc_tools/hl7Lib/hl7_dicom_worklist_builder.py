@@ -147,27 +147,42 @@ class DicomWorklistBuilder:
 
             legacy_output_path = worklist_folder / f"{filename_source}.wl"
             uses_encoded_name = legacy_output_path != encoded_output_path
+            output_path = encoded_output_path
             if uses_encoded_name and os.path.lexists(legacy_output_path):
                 try:
                     legacy_output_path.resolve().relative_to(worklist_folder)
                 except ValueError:
                     raise ValueError("Legacy worklist path must remain inside the configured folder")
-                output_path = legacy_output_path
-            else:
-                output_path = encoded_output_path
-                if uses_encoded_name and os.path.lexists(output_path):
-                    try:
-                        existing_accession_number = str(
-                            pydicom.dcmread(output_path, stop_before_pixels=True).AccessionNumber
-                        )
-                    except (AttributeError, pydicom.errors.InvalidDicomError) as ex:
-                        raise ValueError(
-                            "Existing encoded worklist cannot be safely identified"
-                        ) from ex
-                    if existing_accession_number != filename_source:
-                        raise ValueError(
-                            "Existing encoded worklist belongs to a different accession"
-                        )
+                try:
+                    legacy_accession_number = str(
+                        pydicom.dcmread(
+                            legacy_output_path,
+                            stop_before_pixels=True,
+                        ).AccessionNumber
+                    )
+                except (AttributeError, pydicom.errors.InvalidDicomError) as ex:
+                    raise ValueError(
+                        "Existing legacy worklist cannot be safely identified"
+                    ) from ex
+                if legacy_accession_number == filename_source:
+                    output_path = legacy_output_path
+            if (
+                uses_encoded_name
+                and output_path == encoded_output_path
+                and os.path.lexists(output_path)
+            ):
+                try:
+                    existing_accession_number = str(
+                        pydicom.dcmread(output_path, stop_before_pixels=True).AccessionNumber
+                    )
+                except (AttributeError, pydicom.errors.InvalidDicomError) as ex:
+                    raise ValueError(
+                        "Existing encoded worklist cannot be safely identified"
+                    ) from ex
+                if existing_accession_number != filename_source:
+                    raise ValueError(
+                        "Existing encoded worklist belongs to a different accession"
+                    )
             file_name = os.fspath(output_path)
 
         output_path = Path(file_name)

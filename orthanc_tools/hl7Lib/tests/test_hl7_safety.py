@@ -261,6 +261,17 @@ class TestWorklistFileSafety(unittest.TestCase):
                 pydicom.dcmread(colliding_path).AccessionNumber,
             )
 
+    def test_encoded_filename_is_not_reused_as_another_legacy_name(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            builder = DicomWorklistBuilder(folder=temporary_dir)
+            spaced_path = builder.generate(self._values("ABC 123"))
+
+            percent_path = builder.generate(self._values("ABC%20123"))
+
+            self.assertNotEqual(spaced_path, percent_path)
+            self.assertEqual("ABC 123", pydicom.dcmread(spaced_path).AccessionNumber)
+            self.assertEqual("ABC%20123", pydicom.dcmread(percent_path).AccessionNumber)
+
     def test_missing_accession_number_uses_generated_uid_filename(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             builder = DicomWorklistBuilder(folder=temporary_dir)
