@@ -1,11 +1,52 @@
+import errno
 import os
+import secrets
+import stat
 import typing
+from pathlib import Path
 import pydicom
 from enum import Enum
 from typing import List, Union
 from pprint import pprint
+from urllib.parse import quote
 
 from orthanc_api_client import OrthancApiClient
+
+_IS_WINDOWS = os.name == "nt"
+
+
+def _write_in_place(ds, output_path, expected_stat):
+    open_flags = os.O_WRONLY
+    if hasattr(os, "O_BINARY"):
+        open_flags |= os.O_BINARY
+    output_fd = os.open(output_path, open_flags)
+    try:
+        opened_stat = os.fstat(output_fd)
+        if (
+            opened_stat.st_dev != expected_stat.st_dev
+            or opened_stat.st_ino != expected_stat.st_ino
+        ):
+            raise ValueError("Worklist destination changed before it could be written")
+        with os.fdopen(output_fd, "wb") as output_file:
+            output_fd = None
+            output_file.truncate(0)
+            ds.save_as(output_file, enforce_file_format=True)
+    finally:
+        if output_fd is not None:
+            os.close(output_fd)
+
+
+def _unlink_if_same_file(path, expected_stat):
+    try:
+        current_stat = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if (
+        current_stat.st_dev == expected_stat.st_dev
+        and current_stat.st_ino == expected_stat.st_ino
+    ):
+        os.unlink(path)
+
 
 class DicomElementType(Enum):
     MANDATORY = 1  # for dicom tags that must be there (type 1 or 1c) -> throw an exception if not present
@@ -123,10 +164,167 @@ class DicomWorklistBuilder:
 
         ds = self.customize(ds)
 
+        automatic_worklist_folder = None
         if file_name is None:  # if no filename provided, save in the folder
-            file_name = os.path.join(self._folder, "{id}.wl".format(id = ds.AccessionNumber))
+            filename_source = str(ds.AccessionNumber) or str(ds.SOPInstanceUID)
+            safe_accession_number = quote(filename_source, safe="._-")
+            if safe_accession_number in {".", ".."}:
+                safe_accession_number = safe_accession_number.replace(".", "%2E")
+            if not safe_accession_number:
+                raise ValueError("AccessionNumber cannot be converted to a safe worklist filename")
 
-        ds.save_as(file_name, enforce_file_format=True)
+            worklist_folder = Path(self._folder).resolve()
+            automatic_worklist_folder = worklist_folder
+            encoded_output_path = worklist_folder / f"{safe_accession_number}.wl"
+            try:
+                encoded_output_path.resolve().relative_to(worklist_folder)
+            except ValueError:
+                raise ValueError("Worklist path must remain inside the configured folder")
+
+            legacy_output_path = worklist_folder / f"{filename_source}.wl"
+            uses_encoded_name = legacy_output_path != encoded_output_path
+            output_path = encoded_output_path
+            if uses_encoded_name and os.path.lexists(legacy_output_path):
+                try:
+                    legacy_output_path.resolve().relative_to(worklist_folder)
+                except ValueError:
+                    raise ValueError("Legacy worklist path must remain inside the configured folder")
+                try:
+                    legacy_accession_number = str(
+                        pydicom.dcmread(
+                            legacy_output_path,
+                            stop_before_pixels=True,
+                        ).AccessionNumber
+                    )
+                except (AttributeError, pydicom.errors.InvalidDicomError) as ex:
+                    raise ValueError(
+                        "Existing legacy worklist cannot be safely identified"
+                    ) from ex
+                if legacy_accession_number == filename_source:
+                    output_path = legacy_output_path
+            if (
+                uses_encoded_name
+                and output_path == encoded_output_path
+                and os.path.lexists(output_path)
+            ):
+                try:
+                    existing_accession_number = str(
+                        pydicom.dcmread(output_path, stop_before_pixels=True).AccessionNumber
+                    )
+                except (AttributeError, pydicom.errors.InvalidDicomError) as ex:
+                    raise ValueError(
+                        "Existing encoded worklist cannot be safely identified"
+                    ) from ex
+                if existing_accession_number != filename_source:
+                    raise ValueError(
+                        "Existing encoded worklist belongs to a different accession"
+                    )
+            file_name = os.fspath(output_path)
+
+        output_path = Path(file_name)
+        if automatic_worklist_folder is not None:
+            output_path = output_path.resolve()
+            try:
+                output_path.relative_to(automatic_worklist_folder)
+            except ValueError:
+                raise ValueError("Worklist path must remain inside the configured folder")
+        elif output_path.is_symlink():
+            output_path = output_path.resolve()
+        try:
+            output_stat = output_path.lstat()
+        except FileNotFoundError:
+            output_stat = None
+        if output_stat is not None and stat.S_ISLNK(output_stat.st_mode):
+            raise ValueError("Worklist destination changed to a symbolic link")
+        nested_automatic_destination = (
+            automatic_worklist_folder is not None
+            and output_path.parent != automatic_worklist_folder
+        )
+        # Replacing an inode loses hard links, Windows ACLs, and the validated
+        # identity of automatic destinations reached through subdirectories.
+        if output_stat is not None and (
+            output_stat.st_nlink > 1
+            or _IS_WINDOWS
+            or nested_automatic_destination
+        ):
+            _write_in_place(ds, output_path, output_stat)
+            return file_name
+
+        temp_file_name = os.fspath(
+            output_path.parent
+            / f".{secrets.token_hex(16)}.tmp"
+        )
+        temp_file_stat = None
+        try:
+            with open(temp_file_name, "xb") as temp_file:
+                temp_file_stat = os.fstat(temp_file.fileno())
+                ds.save_as(temp_file, enforce_file_format=True)
+                if output_stat is not None:
+                    if hasattr(os, "fchown"):
+                        os.fchown(
+                            temp_file.fileno(),
+                            output_stat.st_uid,
+                            output_stat.st_gid,
+                        )
+                    elif hasattr(os, "chown"):
+                        os.chown(
+                            temp_file_name,
+                            output_stat.st_uid,
+                            output_stat.st_gid,
+                        )
+                    if hasattr(os, "fchmod"):
+                        os.fchmod(
+                            temp_file.fileno(),
+                            stat.S_IMODE(output_stat.st_mode),
+                        )
+                    else:
+                        os.chmod(temp_file_name, stat.S_IMODE(output_stat.st_mode))
+                    if all(
+                        hasattr(os, name)
+                        for name in ("listxattr", "getxattr", "setxattr")
+                    ):
+                        try:
+                            attribute_names = os.listxattr(output_path)
+                        except OSError as ex:
+                            if ex.errno != errno.ENOTSUP:
+                                raise
+                            attribute_names = []
+                        for attribute_name in attribute_names:
+                            os.setxattr(
+                                temp_file.fileno(),
+                                attribute_name,
+                                os.getxattr(output_path, attribute_name),
+                            )
+            promoted_stat = os.lstat(temp_file_name)
+            if (
+                not stat.S_ISREG(promoted_stat.st_mode)
+                or promoted_stat.st_dev != temp_file_stat.st_dev
+                or promoted_stat.st_ino != temp_file_stat.st_ino
+            ):
+                raise ValueError("Temporary worklist changed before promotion")
+            os.replace(temp_file_name, output_path)
+            temp_file_stat = None
+        except PermissionError:
+            if temp_file_stat is not None:
+                _unlink_if_same_file(temp_file_name, temp_file_stat)
+            if output_stat is None:
+                raise
+            _write_in_place(ds, output_path, output_stat)
+        except OSError as ex:
+            if temp_file_stat is not None:
+                _unlink_if_same_file(temp_file_name, temp_file_stat)
+            if (
+                output_stat is not None
+                and ex.errno in {errno.EBUSY, errno.EROFS, errno.ENOTSUP}
+            ):
+                _write_in_place(ds, output_path, output_stat)
+                return file_name
+            raise
+        except Exception:
+            if temp_file_stat is not None:
+                _unlink_if_same_file(temp_file_name, temp_file_stat)
+            raise
+
         return file_name
 
     def _generate_wl_through_api(self, values: typing.Dict[str, str], entropy_srcs: List[str] = None):
