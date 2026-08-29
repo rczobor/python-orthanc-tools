@@ -116,6 +116,11 @@ volumes, and use fixed localhost ports:
 - `tests.test_orthanc_replicator`
 - `tests.test_label_modifier`
 
+`tests.test_3_orthancs` skips Compose when `ORTHANC_TEST_EXTERNAL=1` and uses
+`ORTHANC_TEST_HOST`, but its tests still call `delete_all_content()`. Unset both
+variables for normal runs. Use external mode only when the user explicitly
+requests it and the three target Orthanc instances are confirmed disposable.
+
 Before running one, confirm its dedicated ports and containers will not collide
 with another checkout. Afterward, inspect `docker compose` state and `git diff`.
 `tests.test_label_modifier` rewrites
