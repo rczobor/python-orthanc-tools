@@ -1063,6 +1063,64 @@ class TestOrthancFolderImporter(unittest.TestCase):
             [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
         )
 
+    def test_multiple_report_aliases_stay_with_their_study(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "a.dcm").write_bytes(b"dicom-a")
+            Path(temp_dir, "a.pdf").write_bytes(b"pdf-a")
+            Path(temp_dir, "a-report.pdf").write_bytes(b"report-a")
+            Path(temp_dir, "b.dcm").write_bytes(b"dicom-b")
+            Path(temp_dir, "b.pdf").write_bytes(b"pdf-b")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            ["study-a", "study-a", "study-b"],
+            [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
+        )
+
+    def test_nested_archive_groups_include_their_parent_path(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-1"], ["instance-2"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-1", "study-2"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for year in ("year1", "year2"):
+                image_dir = Path(temp_dir, "images", year)
+                report_dir = Path(temp_dir, "reports", year)
+                image_dir.mkdir(parents=True)
+                report_dir.mkdir(parents=True)
+                with zipfile.ZipFile(Path(image_dir, "a.zip"), "w") as archive:
+                    archive.writestr("image.dcm", f"dicom-{year}".encode())
+                with zipfile.ZipFile(Path(report_dir, "a.zip"), "w") as archive:
+                    archive.writestr("report.pdf", f"pdf-{year}".encode())
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            ["study-1", "study-2"],
+            [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

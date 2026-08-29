@@ -400,7 +400,12 @@ class OrthancFolderImporter:
                 continue
             priority = 1 if has_dicom else 2
             stem = os.path.splitext(os.path.basename(name.lower()))[0]
-            groups.setdefault(self._strip_role_suffix(stem), []).append((name, priority))
+            parent_parts = Path(name.lower()).parts[:-1]
+            role_names = {"image", "images", "dicom", "report", "reports", "pdf", "pdfs"}
+            if parent_parts and parent_parts[0] in role_names:
+                parent_parts = parent_parts[1:]
+            group = (parent_parts, self._strip_role_suffix(stem))
+            groups.setdefault(group, []).append((name, priority))
 
         paired = {}
         for entries in groups.values():
@@ -550,14 +555,32 @@ class OrthancFolderImporter:
         }
         paired_archive_groups = archive_dicom_groups & archive_report_groups
 
-        entry_groups = {
-            name: (
-                archive_groups[name]
-                if archive_groups.get(name) in paired_archive_groups
-                else stem
-            )
+        dicom_stems = {
+            stem
             for name, stem in entry_stems.items()
+            if direct_priorities[name] == 1
         }
+        entry_groups = {}
+        for name, stem in entry_stems.items():
+            if archive_groups.get(name) in paired_archive_groups:
+                entry_groups[name] = archive_groups[name]
+            elif direct_priorities[name] == 2:
+                normalized_stem = strip_role_suffix(stem)
+                if stem in dicom_stems:
+                    entry_groups[name] = stem
+                elif any(
+                    dicom_stem == normalized_stem
+                    or any(
+                        dicom_stem.startswith(f"{normalized_stem}{separator}")
+                        for separator in ("-", "_", ".", " ")
+                    )
+                    for dicom_stem in dicom_stems
+                ):
+                    entry_groups[name] = normalized_stem
+                else:
+                    entry_groups[name] = stem
+            else:
+                entry_groups[name] = stem
         report_groups = {
             entry_groups[name]
             for name in entry_groups
