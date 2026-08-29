@@ -216,6 +216,39 @@ class TestWorklistFileSafety(unittest.TestCase):
             self.assertTrue(os.path.isfile(spaced_path))
             self.assertTrue(os.path.isfile(underscored_path))
 
+    def test_existing_legacy_filename_is_reused(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            legacy_path = os.path.join(temporary_dir, "ABC 123.wl")
+            DicomWorklistBuilder().generate(
+                self._values("ABC 123"),
+                file_name=legacy_path,
+            )
+
+            returned_path = DicomWorklistBuilder(folder=temporary_dir).generate(
+                self._values("ABC 123")
+            )
+
+            self.assertEqual(legacy_path, returned_path)
+            self.assertFalse(os.path.exists(os.path.join(temporary_dir, "ABC%20123.wl")))
+
+    def test_encoded_filename_cannot_replace_different_legacy_accession(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            colliding_path = os.path.join(temporary_dir, "ABC%20123.wl")
+            DicomWorklistBuilder().generate(
+                self._values("ABC%20123"),
+                file_name=colliding_path,
+            )
+
+            with self.assertRaisesRegex(ValueError, "different accession"):
+                DicomWorklistBuilder(folder=temporary_dir).generate(
+                    self._values("ABC 123")
+                )
+
+            self.assertEqual(
+                "ABC%20123",
+                pydicom.dcmread(colliding_path).AccessionNumber,
+            )
+
     def test_missing_accession_number_uses_generated_uid_filename(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             builder = DicomWorklistBuilder(folder=temporary_dir)
