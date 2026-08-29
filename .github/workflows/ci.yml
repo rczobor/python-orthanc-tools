@@ -79,6 +79,7 @@ jobs:
           python -m unittest tests/test_label_modifier.py
 
       - name: Run three-Orthanc integration tests
+        timeout-minutes: 10
         run: python -m unittest tests/test_3_orthancs.py
 
       - name: Run replicator integration tests

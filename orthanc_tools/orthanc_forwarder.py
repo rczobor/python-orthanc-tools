@@ -426,7 +426,7 @@ class OrthancForwarder:
         ) == self._terminal_marker(instances_set)
 
     def _terminal_marker(self, instances_set: InstancesSet):
-        study_id = instances_set.id if self._trigger == ChangeType.STABLE_STUDY else self._get_study_id(instances_set)
+        study_id = self._get_study_id(instances_set)
         study_last_update = ""
         if study_id:
             study = self._source.studies.get(study_id)
