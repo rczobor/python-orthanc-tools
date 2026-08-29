@@ -253,6 +253,7 @@ class OrthancFolderImporter:
             ## process them
 
             study_id = study_orthanc_id
+            active_study_group = None
             path_entries = (
                 self._list_and_sort_dir(path_to_upload)
                 if self._dicomize_pdf
@@ -269,10 +270,10 @@ class OrthancFolderImporter:
                 full_path = os.path.join(path_to_upload, path)
                 try:
                     _, extension = os.path.splitext(full_path)
-                    clear_study_context = (
+                    entry_study_group = self._matching_report_group(path, path_entries)
+                    is_skipped = (
                         os.path.isfile(full_path)
                         and extension.lower() in self._skip_extensions
-                        and self._has_paired_report(path, path_entries)
                     )
                     archive_group = paired_archive_groups.get(path)
                     if archive_group:
@@ -294,12 +295,33 @@ class OrthancFolderImporter:
                                 study_orthanc_id=study_id,
                             )
                     else:
-                        study_id = self.upload_and_label(
+                        previous_study_id = study_id
+                        next_study_id = self.upload_and_label(
                             path_to_upload=full_path,
                             study_orthanc_id=study_id,
                         )
-                        if clear_study_context:
+                        if full_path.lower().endswith(".pdf"):
+                            study_id = next_study_id
+                        elif is_skipped:
+                            if (
+                                entry_study_group is None
+                                or entry_study_group == active_study_group
+                            ):
+                                study_id = previous_study_id
+                            else:
+                                study_id = None
+                                active_study_group = None
+                        elif next_study_id is not None:
+                            study_id = next_study_id
+                            active_study_group = entry_study_group
+                        elif (
+                            entry_study_group is not None
+                            and entry_study_group == active_study_group
+                        ):
+                            study_id = previous_study_id
+                        else:
                             study_id = None
+                            active_study_group = None
                 except Exception as e:
                     logger.exception(f"Error while processing folder entry: {full_path}")
                     study_id = None
@@ -365,17 +387,30 @@ class OrthancFolderImporter:
                     return stem[:-len(suffix)]
         return stem
 
-    def _has_paired_report(self, name, path_entries):
-        stem = self._strip_role_suffix(
-            os.path.splitext(os.path.basename(name.lower()))[0]
-        )
-        return any(
-            candidate.lower().endswith(".pdf")
-            and self._strip_role_suffix(
-                os.path.splitext(os.path.basename(candidate.lower()))[0]
-            ) == stem
+    def _matching_report_group(self, name, path_entries):
+        stem = os.path.splitext(os.path.basename(name.lower()))[0]
+        report_stems = [
+            os.path.splitext(os.path.basename(candidate.lower()))[0]
             for candidate in path_entries
-        )
+            if candidate.lower().endswith(".pdf")
+        ]
+        if stem in report_stems:
+            return stem
+
+        candidates = [
+            normalized_stem
+            for report_stem in report_stems
+            for normalized_stem in [self._strip_role_suffix(report_stem)]
+            if stem == normalized_stem
+            or any(
+                stem.startswith(f"{normalized_stem}{separator}")
+                for separator in ("-", "_", ".", " ")
+            )
+        ]
+        return max(candidates, key=len) if candidates else None
+
+    def _has_paired_report(self, name, path_entries):
+        return self._matching_report_group(name, path_entries) is not None
 
     def _paired_archive_groups(self, folder_path, path_entries):
 
@@ -448,17 +483,42 @@ class OrthancFolderImporter:
         path_entries = os.listdir(path=folder_path)
         image_roles = {"image", "images", "dicom"}
         report_roles = {"report", "reports", "pdf", "pdfs"}
+        def role_directory_group(name, roles):
+            lower_name = name.lower()
+            if lower_name in roles:
+                return ""
+            for role in roles:
+                for separator in ("-", "_", ".", " "):
+                    suffix = f"{separator}{role}"
+                    if lower_name.endswith(suffix):
+                        return lower_name[:-len(suffix)]
+            return None
+
+        image_directory_groups = {}
+        report_directory_groups = {}
+        for name in path_entries:
+            if not os.path.isdir(os.path.join(folder_path, name)):
+                continue
+            image_group = role_directory_group(name, image_roles)
+            report_group = role_directory_group(name, report_roles)
+            if image_group is not None:
+                image_directory_groups[name] = image_group
+            if report_group is not None:
+                report_directory_groups[name] = report_group
+
+        paired_directory_groups = (
+            set(image_directory_groups.values())
+            & set(report_directory_groups.values())
+        )
         centralized_image_dirs = {
             name
-            for name in path_entries
-            if name.lower() in image_roles
-            and os.path.isdir(os.path.join(folder_path, name))
+            for name, group in image_directory_groups.items()
+            if group in paired_directory_groups
         }
         centralized_report_dirs = {
             name
-            for name in path_entries
-            if name.lower() in report_roles
-            and os.path.isdir(os.path.join(folder_path, name))
+            for name, group in report_directory_groups.items()
+            if group in paired_directory_groups
         }
         centralized_dirs = centralized_image_dirs | centralized_report_dirs
         if centralized_image_dirs and centralized_report_dirs:
@@ -487,13 +547,22 @@ class OrthancFolderImporter:
         def strip_role_suffix(stem):
             return "" if stem in image_roles | report_roles else self._strip_role_suffix(stem)
 
+        def centralized_parent(parts):
+            directory_group = (
+                image_directory_groups.get(parts[0])
+                if parts[0] in centralized_image_dirs
+                else report_directory_groups.get(parts[0])
+            )
+            prefix = (directory_group,) if directory_group else ()
+            return prefix + tuple(part.lower() for part in parts[1:-1])
+
         centralized_stems = {}
         for name in path_entries:
             parts = Path(name).parts
-            if len(parts) <= 2 or parts[0] not in centralized_dirs:
+            if len(parts) < 2 or parts[0] not in centralized_dirs:
                 continue
             role = "image" if parts[0] in centralized_image_dirs else "report"
-            parent = tuple(part.lower() for part in parts[1:-1])
+            parent = centralized_parent(parts)
             stem = os.path.splitext(os.path.basename(name.lower()))[0]
             centralized_stems.setdefault((parent, role), set()).add(stem)
 
@@ -519,12 +588,13 @@ class OrthancFolderImporter:
             base_name = os.path.basename(name.lower())
             if os.path.isfile(path):
                 parts = Path(name).parts
-                if len(parts) > 2 and parts[0] in centralized_dirs:
-                    parent = tuple(part.lower() for part in parts[1:-1])
+                if len(parts) > 1 and parts[0] in centralized_dirs:
+                    parent = centralized_parent(parts)
                     if parent in named_centralized_parents:
                         stem = os.path.splitext(base_name)[0]
                         return os.path.join(*parent, stem)
-                    return os.path.join(*parent)
+                    if parent:
+                        return os.path.join(*parent)
                 return os.path.splitext(base_name)[0]
 
             return strip_role_suffix(base_name)

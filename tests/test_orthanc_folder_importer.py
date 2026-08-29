@@ -1121,6 +1121,88 @@ class TestOrthancFolderImporter(unittest.TestCase):
             [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
         )
 
+    def test_suffix_qualified_role_directories_pair_studies(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_dir = Path(temp_dir, "batch-images")
+            report_dir = Path(temp_dir, "batch-reports")
+            image_dir.mkdir()
+            report_dir.mkdir()
+            for study in ("a", "b"):
+                Path(image_dir, f"{study}.dcm").write_bytes(f"dicom-{study}".encode())
+                Path(report_dir, f"{study}.pdf").write_bytes(f"pdf-{study}".encode())
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            ["study-a", "study-b"],
+            [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
+        )
+
+    def test_skipped_multi_instance_member_clears_previous_study(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-a"]
+        api_client.instances.get_parent_study_id.return_value = "study-a"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "a.dcm").write_bytes(b"dicom-a")
+            Path(temp_dir, "a.pdf").write_bytes(b"pdf-a")
+            Path(temp_dir, "b-1.ima").write_bytes(b"dicom-b")
+            Path(temp_dir, "b.pdf").write_bytes(b"pdf-b")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                skip_extensions=[".ima"],
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            ["study-a"],
+            [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
+        )
+
+    def test_failed_later_instance_preserves_its_study_for_report(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], []]
+        api_client.instances.get_parent_study_id.return_value = "study-a"
+        api_client.is_alive.return_value = True
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "a-1.dcm").write_bytes(b"dicom-a-1")
+            Path(temp_dir, "a-2.dcm").write_bytes(b"invalid-a-2")
+            Path(temp_dir, "a.pdf").write_bytes(b"pdf-a")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            ["study-a"],
+            [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
