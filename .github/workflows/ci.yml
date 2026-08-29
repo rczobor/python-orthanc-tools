@@ -47,6 +47,7 @@ jobs:
           python -m unittest orthanc_tools.hl7Lib.tests.test_hl7_validator
           python -m unittest orthanc_tools.hl7Lib.tests.test_hl7_worklist_parser
           python -m unittest tests/test_old_files_deleter.py
+          python -m unittest tests/test_runtime_helpers.py
           python -m unittest tests/test_label_modifier_readiness.py
           python -m unittest tests/test_orthanc_replicator_lifecycle.py
           python -m unittest tests/test_postgres_dumper.py
