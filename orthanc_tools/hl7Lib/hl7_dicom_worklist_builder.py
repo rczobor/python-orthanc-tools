@@ -137,8 +137,10 @@ class DicomWorklistBuilder:
                 raise ValueError("AccessionNumber cannot be converted to a safe worklist filename")
 
             worklist_folder = Path(self._folder).resolve()
-            output_path = (worklist_folder / f"{safe_accession_number}.wl").resolve()
-            if output_path.parent != worklist_folder:
+            output_path = worklist_folder / f"{safe_accession_number}.wl"
+            try:
+                output_path.resolve().relative_to(worklist_folder)
+            except ValueError:
                 raise ValueError("Worklist path must remain inside the configured folder")
             file_name = os.fspath(output_path)
 

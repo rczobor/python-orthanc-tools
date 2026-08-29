@@ -3,6 +3,7 @@ import os
 import stat
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import hl7
@@ -289,6 +290,45 @@ class TestWorklistFileSafety(unittest.TestCase):
             self.assertEqual(link_path, returned_path)
             self.assertTrue(os.path.islink(link_path))
             self.assertEqual("patient", pydicom.dcmread(target_path).PatientID)
+
+    def test_automatic_symlink_updates_target_inside_worklist_folder(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            archive_dir = os.path.join(temporary_dir, "archive")
+            os.mkdir(archive_dir)
+            target_path = os.path.join(archive_dir, "safe-accession.wl")
+            link_path = os.path.join(temporary_dir, "safe-accession.wl")
+            with open(target_path, "wb") as target_file:
+                target_file.write(b"existing")
+            try:
+                os.symlink(target_path, link_path)
+            except (OSError, NotImplementedError) as ex:
+                self.skipTest(f"symbolic links are unavailable: {ex}")
+
+            builder = DicomWorklistBuilder(folder=temporary_dir)
+            returned_path = builder.generate(self._values("safe-accession"))
+
+            self.assertEqual(link_path, returned_path)
+            self.assertTrue(os.path.islink(link_path))
+            self.assertEqual("patient", pydicom.dcmread(target_path).PatientID)
+
+    def test_automatic_symlink_cannot_escape_worklist_folder(self):
+        with tempfile.TemporaryDirectory() as parent_dir:
+            worklist_dir = os.path.join(parent_dir, "worklists")
+            os.mkdir(worklist_dir)
+            target_path = os.path.join(parent_dir, "outside.wl")
+            link_path = os.path.join(worklist_dir, "safe-accession.wl")
+            with open(target_path, "wb") as target_file:
+                target_file.write(b"existing")
+            try:
+                os.symlink(target_path, link_path)
+            except (OSError, NotImplementedError) as ex:
+                self.skipTest(f"symbolic links are unavailable: {ex}")
+
+            builder = DicomWorklistBuilder(folder=worklist_dir)
+            with self.assertRaisesRegex(ValueError, "must remain inside"):
+                builder.generate(self._values("safe-accession"))
+
+            self.assertEqual(b"existing", Path(target_path).read_bytes())
 
     def test_hard_linked_destination_updates_all_links(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
