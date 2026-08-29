@@ -206,6 +206,84 @@ class TestOrthancFolderImporter(unittest.TestCase):
             series_description="PDF report",
         )
 
+    def test_pdf_resume_reprocesses_checkpointed_child_for_study_context(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-id"]
+        api_client.instances.get_parent_study_id.return_value = "study-id"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_dir = Path(temp_dir, "input")
+            images_dir = Path(input_dir, "a-images")
+            reports_dir = Path(input_dir, "b-reports")
+            input_dir.mkdir()
+            images_dir.mkdir()
+            reports_dir.mkdir()
+            Path(images_dir, "image.dcm").write_bytes(b"dicom")
+            Path(reports_dir, "report.pdf").write_bytes(b"pdf")
+            state_path = Path(temp_dir, "state.txt")
+            state_path.write_text(f"{images_dir}\n", encoding="utf-8")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=str(input_dir),
+                errors_path=None,
+                state_path=str(state_path),
+                max_retries=0,
+                worker_threads_count=1,
+                dicomize_pdf=True,
+            )
+
+            importer.execute()
+
+        api_client.upload.assert_called_once()
+        api_client.studies.attach_pdf.assert_called_once_with(
+            study_id="study-id",
+            pdf_path=mock.ANY,
+            series_description="PDF report",
+        )
+
+    def test_execute_queues_top_level_entries_when_pdf_conversion_is_off(self):
+        api_client = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first_path = Path(temp_dir, "first.dcm")
+            second_path = Path(temp_dir, "second.dcm")
+            first_path.write_bytes(b"dicom")
+            second_path.write_bytes(b"dicom")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                worker_threads_count=2,
+            )
+
+            with mock.patch.object(importer, "upload_and_label") as upload:
+                importer.execute()
+
+        self.assertCountEqual(
+            [mock.call(path_to_upload=str(first_path)), mock.call(path_to_upload=str(second_path))],
+            upload.call_args_list,
+        )
+
+    def test_upload_skips_parent_study_lookup_when_context_is_unused(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-id"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir, "image.dcm")
+            input_path.write_bytes(b"dicom")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+            )
+
+            importer.upload_and_label(str(input_path))
+
+        api_client.instances.get_parent_study_id.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

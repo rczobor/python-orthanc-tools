@@ -190,7 +190,9 @@ class OrthancFolderImporter:
                             self.add_file_name_in_errors_log(file_path=path_to_upload)
                             return study_orthanc_id
 
-                        study_id = self._api_client.instances.get_parent_study_id(instance_orthanc_ids[0])
+                        study_id = study_orthanc_id
+                        if self._dicomize_pdf or self._labels_list is not None:
+                            study_id = self._api_client.instances.get_parent_study_id(instance_orthanc_ids[0])
 
                         # we label for each instance, not at the end of the study, so that there is never an unlabeled image in Orthanc
                         if self._labels_list is not None:
@@ -229,7 +231,11 @@ class OrthancFolderImporter:
         # folder case
         elif os.path.isdir(path_to_upload):
             # this folder could have been processed in a previous run of the script
-            if path_to_upload in self._folders_uploaded:
+            is_import_root = os.path.abspath(path_to_upload) == os.path.abspath(self._folder_path)
+            if (
+                path_to_upload in self._folders_uploaded
+                and (not self._dicomize_pdf or is_import_root)
+            ):
                 logger.info(f"Folder {path_to_upload} already processed, skipping...")
                 return study_orthanc_id
 
@@ -251,7 +257,8 @@ class OrthancFolderImporter:
             #     self.upload_and_label(path_to_upload=full_path)
 
             # let's add this folder path in the processed ones:
-            self.add_folder_path_in_state_file(path_to_upload)
+            if not self._dicomize_pdf or is_import_root:
+                self.add_folder_path_in_state_file(path_to_upload)
             return study_id
 
     def process_dicom_file(self, file_content: bytes) -> bytes:
@@ -309,21 +316,6 @@ class OrthancFolderImporter:
         )
         return path_entries
 
-    def _is_folder_containing_folders_only(self, folder_path):
-        '''
-        Will return True if there are only subfolders in the considered folder
-        Else: False
-        NB: is there are files which are not importable (different from pdf/dcm)
-        they are ignored.
-        '''
-        for path in os.listdir(path=folder_path):
-            full_path = os.path.join(self._folder_path, path)
-            if os.path.isfile(full_path) and full_path.lower().endswith((".pdf", ".dcm")):
-                return False
-
-        return True
-
-
     def execute(self):
         # read state
         if self._state_path and os.path.isfile(self._state_path):
@@ -345,17 +337,13 @@ class OrthancFolderImporter:
 
         # let's browse the main folder to feed the message queue
 
-        # PDF reports may live in a sibling folder and need the study ID produced
-        # by an earlier DICOM upload, so keep the root traversal on one worker.
-        if (
-            not self._dicomize_pdf
-            and self._is_folder_containing_folders_only(self._folder_path)
-        ):
+        if not self._dicomize_pdf:
             for path in os.listdir(path=self._folder_path):
                 full_path = os.path.join(self._folder_path, path)
                 self._messages.put(full_path) # if the queue is full, this will block until there's a free slot
 
-        # if there are files, we won't (so that pdf can be handled)
+        # PDF reports may live in a sibling folder and need the study ID produced
+        # by an earlier DICOM upload, so keep the root traversal on one worker.
         else:
             self._messages.put(self._folder_path)
 
