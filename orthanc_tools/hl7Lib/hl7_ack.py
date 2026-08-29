@@ -6,6 +6,7 @@ import hl7
 
 
 def _escape_hl7_text(value: str) -> str:
+    value = value.encode("iso-8859-1", errors="replace").decode("iso-8859-1")
     return (
         value.replace("\\", "\\E\\")
         .replace("|", "\\F\\")

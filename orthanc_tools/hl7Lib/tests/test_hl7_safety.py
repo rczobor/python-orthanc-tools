@@ -125,6 +125,25 @@ class TestHl7Acknowledgements(unittest.TestCase):
         self.assertEqual("ACK", response["MSH.F9.R1.C1"])
         self.assertEqual("O01", response["MSH.F9.R1.C2"])
 
+    def test_error_acknowledgement_allows_missing_control_id(self):
+        response = handle_error_message(
+            r"MSH|^~\&|S|F|R|D|||BAD",
+            error_description="unsupported message",
+        )
+
+        self.assertEqual("AR", response["MSA.F1.R1"])
+        self.assertEqual("", response["MSA.F2.R1"])
+
+    def test_error_description_remains_encodable_for_mllp(self):
+        response = handle_error_message(
+            ORM_MESSAGE,
+            error_description="invalid path 📁",
+        )
+
+        encoded_response = str(response).encode("iso-8859-1")
+
+        self.assertIn(b"invalid path ?", encoded_response)
+
 
 class TestMllpClientWrites(unittest.TestCase):
     def test_send_uses_sendall(self):
