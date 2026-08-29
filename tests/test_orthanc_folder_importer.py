@@ -1267,6 +1267,69 @@ class TestOrthancFolderImporter(unittest.TestCase):
             series_description="PDF report",
         )
 
+    def test_grouped_archives_align_by_member_study_names(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_members = (
+                ("batch-dicom.zip", "a.dcm", b"dicom-a"),
+                ("batch-images.zip", "b.dcm", b"dicom-b"),
+                ("batch-pdf.zip", "b.pdf", b"pdf-b"),
+                ("batch-reports.zip", "a.pdf", b"pdf-a"),
+            )
+            for archive_name, member_name, content in archive_members:
+                with zipfile.ZipFile(Path(temp_dir, archive_name), "w") as archive:
+                    archive.writestr(member_name, content)
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            {"a.pdf": "study-a", "b.pdf": "study-b"},
+            {
+                Path(call.kwargs["pdf_path"]).name: call.kwargs["study_id"]
+                for call in api_client.studies.attach_pdf.call_args_list
+            },
+        )
+
+    def test_paired_archive_sets_active_group_for_later_failed_instance(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], []]
+        api_client.instances.get_parent_study_id.return_value = "study-a"
+        api_client.is_alive.return_value = True
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with zipfile.ZipFile(Path(temp_dir, "a-images.zip"), "w") as archive:
+                archive.writestr("image.dcm", b"dicom-a")
+            with zipfile.ZipFile(Path(temp_dir, "a-reports.zip"), "w") as archive:
+                archive.writestr("report.pdf", b"pdf-a-1")
+            Path(temp_dir, "a-z.dcm").write_bytes(b"invalid-a")
+            Path(temp_dir, "a.pdf").write_bytes(b"pdf-a-2")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            ["study-a", "study-a"],
+            [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

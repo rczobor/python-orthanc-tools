@@ -297,6 +297,13 @@ class OrthancFolderImporter:
                                 path_to_upload=temp_dir,
                                 study_orthanc_id=study_id,
                             )
+                            if study_id is not None:
+                                active_study_group = (
+                                    self._matching_report_group(path, path_entries)
+                                    or self._strip_role_suffix(
+                                        os.path.splitext(os.path.basename(path.lower()))[0]
+                                    )
+                                )
                     else:
                         previous_study_id = study_id
                         next_study_id = self.upload_and_label(
@@ -447,15 +454,46 @@ class OrthancFolderImporter:
                 if normalized_parent != parent_parts[0]:
                     parent_parts = (normalized_parent,) + parent_parts[1:]
             group = (parent_parts, self._strip_role_suffix(stem))
-            groups.setdefault(group, []).append((name, priority))
+            member_signature = tuple(sorted({
+                self._strip_role_suffix(
+                    os.path.splitext(os.path.basename(member))[0]
+                )
+                for member in member_names
+                if member.endswith(".pdf")
+                or os.path.splitext(member)[1] not in self._skip_extensions
+            }))
+            groups.setdefault(group, []).append((name, priority, member_signature))
 
         paired = {}
-        for entries in groups.values():
-            if {priority for _, priority in entries} != {1, 2}:
-                continue
-            archive_group = tuple(sorted(entries, key=lambda entry: (entry[1], entry[0])))
-            for name, _ in entries:
+
+        def add_group(entries):
+            if {priority for _, priority, _ in entries} != {1, 2}:
+                return
+            archive_group = tuple(sorted(
+                ((name, priority) for name, priority, _ in entries),
+                key=lambda entry: (entry[1], entry[0]),
+            ))
+            for name, _, _ in entries:
                 paired[name] = archive_group
+
+        for entries in groups.values():
+            image_signatures = {
+                signature for _, priority, signature in entries if priority == 1
+            }
+            report_signatures = {
+                signature for _, priority, signature in entries if priority == 2
+            }
+            matched_signatures = image_signatures & report_signatures
+            matched_names = set()
+            for signature in matched_signatures:
+                signature_entries = [
+                    entry for entry in entries if entry[2] == signature
+                ]
+                add_group(signature_entries)
+                matched_names.update(name for name, _, _ in signature_entries)
+            add_group([
+                entry for entry in entries if entry[0] not in matched_names
+            ])
         return paired
 
     def _list_and_sort_dir(self, folder_path):
