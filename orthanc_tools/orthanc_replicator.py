@@ -91,10 +91,6 @@ class OrthancReplicator:
             params.blocked_connection_timeout or BROKER_SETUP_TIMEOUT,
             BROKER_SETUP_TIMEOUT,
         )
-        if not isinstance(params.heartbeat, (int, float)) or params.heartbeat <= 0:
-            params.heartbeat = BROKER_SETUP_TIMEOUT
-        else:
-            params.heartbeat = min(params.heartbeat, BROKER_SETUP_TIMEOUT)
         return params
 
     def to_delete_callback(self, channel, method, properties, body):
@@ -271,6 +267,10 @@ class OrthancReplicator:
         self._consuming_thread = threading.Thread(target=self._consume, daemon=True)
         self._consuming_thread.start()
 
+    def wait(self):
+        if self._consuming_thread is not None:
+            self._consuming_thread.join()
+
 # example:
 # python orthanc_tools/orthanc_replicator.py --source_url=http://localhost:8042 --dest_url=http://localhost:8044 --broker_url=http://localhost
 
@@ -339,6 +339,7 @@ if __name__ == '__main__':
     )
 
     replicator.execute()
+    replicator.wait()
 
 
 

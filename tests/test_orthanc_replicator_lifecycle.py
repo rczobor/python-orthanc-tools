@@ -103,9 +103,9 @@ class TestOrthancReplicatorLifecycle(unittest.TestCase):
         self.assertEqual(5, bounded_params.socket_timeout)
         self.assertEqual(5, bounded_params.stack_timeout)
         self.assertEqual(5, bounded_params.blocked_connection_timeout)
-        self.assertEqual(5, bounded_params.heartbeat)
         self.assertEqual(3, broker_params.connection_attempts)
         self.assertIsNone(broker_params.socket_timeout)
+        self.assertEqual(broker_params.heartbeat, bounded_params.heartbeat)
 
     def test_stop_waits_for_its_consumer_thread(self):
         channel = FakeChannel()
