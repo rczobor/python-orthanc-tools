@@ -423,14 +423,22 @@ class OrthancForwarder:
             instances_set.id,
             metadata_name=TERMINAL_METADATA_NAME,
             default_value="",
-        ) == self._terminal_configuration
+        ) == self._terminal_marker(instances_set)
+
+    def _terminal_marker(self, instances_set: InstancesSet):
+        study_id = instances_set.id if self._trigger == ChangeType.STABLE_STUDY else self._get_study_id(instances_set)
+        study_last_update = ""
+        if study_id:
+            study = self._source.studies.get(study_id)
+            study_last_update = getattr(study, "last_update", "") or ""
+        return f"{self._terminal_configuration}:{study_last_update}"
 
     def _mark_as_terminal(self, instances_set: InstancesSet):
         logger.info(f"{instances_set} No eligible destinations matched; keeping source data")
         self._resource_client().set_string_metadata(
             instances_set.id,
             metadata_name=TERMINAL_METADATA_NAME,
-            content=self._terminal_configuration,
+            content=self._terminal_marker(instances_set),
         )
         del self._status[instances_set.id]
 

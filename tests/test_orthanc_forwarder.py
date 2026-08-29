@@ -358,6 +358,7 @@ class TestOrthancForwarderFilteringBehavior(unittest.TestCase):
         source.studies.set_string_metadata.side_effect = (
             lambda orthanc_id, metadata_name, content: metadata.__setitem__((orthanc_id, metadata_name), content)
         )
+        source.studies.get.return_value.last_update = "20260828T220000"
         forwarder = OrthancForwarder(
             source=source,
             destinations=[
@@ -397,6 +398,7 @@ class TestOrthancForwarderFilteringBehavior(unittest.TestCase):
         source.studies.set_string_metadata.side_effect = (
             lambda orthanc_id, metadata_name, content: metadata.__setitem__((orthanc_id, metadata_name), content)
         )
+        source.studies.get.return_value.last_update = "20260828T220000"
         first = FakeInstancesSet()
         processor = mock.Mock()
         first_forwarder = OrthancForwarder(source=source, destinations=[], instance_processor=processor)
@@ -415,6 +417,12 @@ class TestOrthancForwarderFilteringBehavior(unittest.TestCase):
             destinations=[ForwarderDestination(destination="orthanc-b", forwarder_mode=ForwarderMode.DICOM)],
         )
         self.assertFalse(changed_forwarder._is_terminal(first))
+
+        source.studies.get.return_value.last_update = "20260828T220100"
+        updated_forwarder = OrthancForwarder(source=source, destinations=[], instance_processor=processor)
+        updated_forwarder.handle_instances_set(first)
+        self.assertEqual(2, first.process_calls)
+        self.assertEqual(2, source.studies.set_string_metadata.call_count)
 
     def test_already_sent_study_is_deleted_when_remaining_filtered_destinations_do_not_match(self):
         forwarder = OrthancForwarder(
