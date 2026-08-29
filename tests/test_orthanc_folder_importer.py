@@ -615,6 +615,71 @@ class TestOrthancFolderImporter(unittest.TestCase):
             api_client.studies.attach_pdf.call_args_list,
         )
 
+    def test_filtered_dicom_clears_previous_study_context(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-a"]
+        api_client.instances.get_parent_study_id.return_value = "study-a"
+
+        class FilteringImporter(OrthancFolderImporter):
+            def process_dicom_file(self, file_content):
+                return None if file_content == b"dicom-b" else file_content
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "a.dcm").write_bytes(b"dicom-a")
+            Path(temp_dir, "a.pdf").write_bytes(b"pdf-a")
+            Path(temp_dir, "b.dcm").write_bytes(b"dicom-b")
+            Path(temp_dir, "b.pdf").write_bytes(b"pdf-b")
+            importer = FilteringImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(1, api_client.studies.attach_pdf.call_count)
+        api_client.studies.attach_pdf.assert_called_once_with(
+            study_id="study-a",
+            pdf_path=str(Path(temp_dir, "a.pdf")),
+            series_description="PDF report",
+        )
+
+    def test_dotted_sibling_directory_ids_keep_their_study(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for directory in (
+                "study.1-images",
+                "study.1-reports",
+                "study.2-images",
+                "study.2-reports",
+            ):
+                Path(temp_dir, directory).mkdir()
+            Path(temp_dir, "study.1-images", "image.dcm").write_bytes(b"dicom-a")
+            Path(temp_dir, "study.1-reports", "report.pdf").write_bytes(b"pdf-a")
+            Path(temp_dir, "study.2-images", "image.dcm").write_bytes(b"dicom-b")
+            Path(temp_dir, "study.2-reports", "report.pdf").write_bytes(b"pdf-b")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            ["study-a", "study-b"],
+            [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

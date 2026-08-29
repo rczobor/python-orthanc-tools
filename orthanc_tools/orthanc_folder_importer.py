@@ -180,7 +180,7 @@ class OrthancFolderImporter:
                         # filtering out case
                         if buffer is None:
                             logger.debug(f"File {path_to_upload} has been filtered out.")
-                            return study_orthanc_id
+                            return None
 
                         # modification case: let's upload the file
                         logger.info(f"uploading {path_to_upload}")
@@ -353,7 +353,12 @@ class OrthancFolderImporter:
 
         path_entries = os.listdir(path=folder_path)
         def pairing_stem(name):
-            stem = os.path.splitext(name.lower())[0]
+            path = os.path.join(folder_path, name)
+            stem = (
+                os.path.splitext(name.lower())[0]
+                if os.path.isfile(path)
+                else name.lower()
+            )
             for role in ("images", "reports", "image", "report", "dicom", "pdf"):
                 if stem == role:
                     return ""
