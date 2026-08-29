@@ -142,11 +142,10 @@ class OrthancFolderImporter:
                 with tempfile.TemporaryDirectory() as tempDir:
                     with zipfile.ZipFile(path_to_upload, 'r') as z:
                         z.extractall(tempDir)
-                    study_id = study_orthanc_id
-                    for path in self._list_and_sort_dir(tempDir):
-                        full_path = os.path.join(tempDir, path)
-                        study_id = self.upload_and_label(path_to_upload=full_path, study_orthanc_id=study_id)
-                    return study_id
+                    return self.upload_and_label(
+                        path_to_upload=tempDir,
+                        study_orthanc_id=study_orthanc_id,
+                    )
 
             else:
                 is_pdf = self._dicomize_pdf and path_to_upload.lower().endswith(".pdf")
@@ -483,13 +482,44 @@ class OrthancFolderImporter:
         def strip_role_suffix(stem):
             return "" if stem in image_roles | report_roles else self._strip_role_suffix(stem)
 
+        centralized_stems = {}
+        for name in path_entries:
+            parts = Path(name).parts
+            if len(parts) <= 2 or parts[0] not in centralized_dirs:
+                continue
+            role = "image" if parts[0] in centralized_image_dirs else "report"
+            parent = tuple(part.lower() for part in parts[1:-1])
+            stem = os.path.splitext(os.path.basename(name.lower()))[0]
+            centralized_stems.setdefault((parent, role), set()).add(stem)
+
+        named_centralized_parents = set()
+        centralized_parents = {parent for parent, _ in centralized_stems}
+        for parent in centralized_parents:
+            image_stems = centralized_stems.get((parent, "image"), set())
+            report_stems = centralized_stems.get((parent, "report"), set())
+            if any(
+                image_stem == report_stem
+                or strip_role_suffix(report_stem) == image_stem
+                or any(
+                    image_stem.startswith(f"{report_stem}{separator}")
+                    for separator in ("-", "_", ".", " ")
+                )
+                for image_stem in image_stems
+                for report_stem in report_stems
+            ):
+                named_centralized_parents.add(parent)
+
         def pairing_stem(name):
             path = os.path.join(folder_path, name)
             base_name = os.path.basename(name.lower())
             if os.path.isfile(path):
                 parts = Path(name).parts
                 if len(parts) > 2 and parts[0] in centralized_dirs:
-                    return os.path.join(*parts[1:-1]).lower()
+                    parent = tuple(part.lower() for part in parts[1:-1])
+                    if parent in named_centralized_parents:
+                        stem = os.path.splitext(base_name)[0]
+                        return os.path.join(*parent, stem)
+                    return os.path.join(*parent)
                 return os.path.splitext(base_name)[0]
 
             return strip_role_suffix(base_name)

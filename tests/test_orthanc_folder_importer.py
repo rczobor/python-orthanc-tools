@@ -969,6 +969,71 @@ class TestOrthancFolderImporter(unittest.TestCase):
             [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
         )
 
+    def test_outer_archive_expands_nested_paired_archives(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            build_dir = Path(temp_dir, "build")
+            build_dir.mkdir()
+            images_path = Path(build_dir, "batch-images.zip")
+            reports_path = Path(build_dir, "batch-reports.zip")
+            with zipfile.ZipFile(images_path, "w") as archive:
+                archive.writestr("a.dcm", b"dicom-a")
+                archive.writestr("b.dcm", b"dicom-b")
+            with zipfile.ZipFile(reports_path, "w") as archive:
+                archive.writestr("a.pdf", b"pdf-a")
+                archive.writestr("b.pdf", b"pdf-b")
+            outer_path = Path(temp_dir, "outer.zip")
+            with zipfile.ZipFile(outer_path, "w") as archive:
+                archive.write(images_path, images_path.name)
+                archive.write(reports_path, reports_path.name)
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(outer_path)
+
+        self.assertEqual(
+            ["study-a", "study-b"],
+            [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
+        )
+
+    def test_shared_centralized_subfolder_preserves_file_pairing(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_dir = Path(temp_dir, "images", "year")
+            report_dir = Path(temp_dir, "reports", "year")
+            image_dir.mkdir(parents=True)
+            report_dir.mkdir(parents=True)
+            for study in ("a", "b"):
+                Path(image_dir, f"{study}.dcm").write_bytes(f"dicom-{study}".encode())
+                Path(report_dir, f"{study}.pdf").write_bytes(f"pdf-{study}".encode())
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            ["study-a", "study-b"],
+            [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
