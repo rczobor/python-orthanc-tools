@@ -1,5 +1,6 @@
 import os
 import re
+import stat
 import tempfile
 import typing
 from pathlib import Path
@@ -139,6 +140,11 @@ class DicomWorklistBuilder:
             file_name = os.fspath(output_path)
 
         output_path = Path(file_name)
+        try:
+            output_mode = stat.S_IMODE(output_path.stat().st_mode)
+        except FileNotFoundError:
+            output_mode = 0o644
+
         temp_file_descriptor, temp_file_name = tempfile.mkstemp(
             dir=output_path.parent,
             prefix=f".{output_path.name}.",
@@ -147,7 +153,7 @@ class DicomWorklistBuilder:
         os.close(temp_file_descriptor)
         try:
             ds.save_as(temp_file_name, enforce_file_format=True)
-            os.chmod(temp_file_name, 0o644)
+            os.chmod(temp_file_name, output_mode)
             os.replace(temp_file_name, output_path)
         except Exception:
             if os.path.exists(temp_file_name):

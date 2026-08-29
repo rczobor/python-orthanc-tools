@@ -29,11 +29,12 @@ def build_acknowledgement(
     trigger_event = str(hl7_request["MSH.F9.R1.C2"]) or "O01"
 
     msh = (
-        "MSH|^~\\&|{sending_application}||{receiving_application}|"
+        "MSH|^~\\&|{sending_application}|{sending_facility}|{receiving_application}|"
         "{receiving_facility}|{date_time}||ACK^{trigger_event}|"
         "{ack_message_id}|P|2.3||||||8859/1"
     ).format(
         sending_application=hl7_request["MSH.F5.R1.C1"],
+        sending_facility=hl7_request["MSH.F6.R1.C1"],
         receiving_application=hl7_request["MSH.F3.R1.C1"],
         receiving_facility=hl7_request["MSH.F4.R1.C1"],
         date_time=datetime.now().strftime("%Y%m%d%H%M%S"),

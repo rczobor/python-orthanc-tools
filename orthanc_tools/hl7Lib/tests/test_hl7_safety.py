@@ -1,4 +1,5 @@
 import os
+import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -59,6 +60,9 @@ class TestHl7Acknowledgements(unittest.TestCase):
         self.assertEqual("AA", response["MSA.F1.R1"])
         self.assertEqual("orm-message-id", response["MSA.F2.R1"])
         self.assertEqual("RECEIVER", response["MSH.F3.R1"])
+        self.assertEqual("DESTINATION", response["MSH.F4.R1"])
+        self.assertEqual("SENDER", response["MSH.F5.R1"])
+        self.assertEqual("FACILITY", response["MSH.F6.R1"])
         self.assertEqual("ACK", response["MSH.F9.R1.C1"])
         self.assertEqual("O01", response["MSH.F9.R1.C2"])
         self.assertNotIn("{sending_application}", str(response))
@@ -165,6 +169,19 @@ class TestWorklistFileSafety(unittest.TestCase):
                     builder.generate(self._values("safe-accession"))
 
             self.assertEqual([], os.listdir(temporary_dir))
+
+    @unittest.skipIf(os.name == "nt", "Windows does not preserve POSIX permission bits")
+    def test_replacing_worklist_preserves_existing_permissions(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            output_path = os.path.join(temporary_dir, "safe-accession.wl")
+            with open(output_path, "wb") as output_file:
+                output_file.write(b"existing")
+            os.chmod(output_path, 0o600)
+
+            builder = DicomWorklistBuilder(folder=temporary_dir)
+            builder.generate(self._values("safe-accession"))
+
+            self.assertEqual(0o600, stat.S_IMODE(os.stat(output_path).st_mode))
 
 
 if __name__ == "__main__":
