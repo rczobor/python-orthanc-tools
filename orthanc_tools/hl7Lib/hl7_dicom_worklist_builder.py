@@ -12,6 +12,8 @@ from urllib.parse import quote
 
 from orthanc_api_client import OrthancApiClient
 
+_IS_WINDOWS = os.name == "nt"
+
 class DicomElementType(Enum):
     MANDATORY = 1  # for dicom tags that must be there (type 1 or 1c) -> throw an exception if not present
     REQUIRED = 2  # for dicom tags that are mandatory but accepts null value (type 2 or 2c)
@@ -151,7 +153,8 @@ class DicomWorklistBuilder:
             output_stat = output_path.stat()
         except FileNotFoundError:
             output_stat = None
-        if output_stat is not None and output_stat.st_nlink > 1:
+        # Replacing an inode loses hard-link identity and Windows file-specific ACLs.
+        if output_stat is not None and (output_stat.st_nlink > 1 or _IS_WINDOWS):
             ds.save_as(output_path, enforce_file_format=True)
             return file_name
 

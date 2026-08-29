@@ -347,6 +347,23 @@ class TestWorklistFileSafety(unittest.TestCase):
             self.assertEqual("patient", pydicom.dcmread(linked_path).PatientID)
             self.assertEqual(os.stat(output_path).st_ino, os.stat(linked_path).st_ino)
 
+    def test_windows_replacement_preserves_existing_inode(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            output_path = os.path.join(temporary_dir, "safe-accession.wl")
+            with open(output_path, "wb") as output_file:
+                output_file.write(b"existing")
+            original_inode = os.stat(output_path).st_ino
+
+            builder = DicomWorklistBuilder(folder=temporary_dir)
+            with mock.patch(
+                "orthanc_tools.hl7Lib.hl7_dicom_worklist_builder._IS_WINDOWS",
+                True,
+            ):
+                builder.generate(self._values("safe-accession"))
+
+            self.assertEqual(original_inode, os.stat(output_path).st_ino)
+            self.assertEqual("patient", pydicom.dcmread(output_path).PatientID)
+
     @unittest.skipUnless(
         all(hasattr(os, name) for name in ("listxattr", "getxattr", "setxattr")),
         "extended attributes are unavailable",
