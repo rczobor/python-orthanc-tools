@@ -359,6 +359,71 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
         api_client.upload.assert_not_called()
 
+    def test_flat_dicom_pdf_pairs_keep_their_study(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "study-a.dcm").write_bytes(b"dicom-a")
+            Path(temp_dir, "study-a.pdf").write_bytes(b"pdf-a")
+            Path(temp_dir, "study-b.dcm").write_bytes(b"dicom-b")
+            Path(temp_dir, "study-b.pdf").write_bytes(b"pdf-b")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            [
+                mock.call(
+                    study_id="study-a",
+                    pdf_path=str(Path(temp_dir, "study-a.pdf")),
+                    series_description="PDF report",
+                ),
+                mock.call(
+                    study_id="study-b",
+                    pdf_path=str(Path(temp_dir, "study-b.pdf")),
+                    series_description="PDF report",
+                ),
+            ],
+            api_client.studies.attach_pdf.call_args_list,
+        )
+
+    def test_nested_pdf_only_zip_is_processed_after_dicom(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-id"]
+        api_client.instances.get_parent_study_id.return_value = "study-id"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "image.dcm").write_bytes(b"dicom")
+            reports_dir = Path(temp_dir, "reports")
+            reports_dir.mkdir()
+            with zipfile.ZipFile(Path(reports_dir, "reports.zip"), "w") as archive:
+                archive.writestr("report.pdf", b"pdf")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        api_client.studies.attach_pdf.assert_called_once_with(
+            study_id="study-id",
+            pdf_path=mock.ANY,
+            series_description="PDF report",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

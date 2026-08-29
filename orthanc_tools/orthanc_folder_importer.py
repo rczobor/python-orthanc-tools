@@ -299,18 +299,15 @@ class OrthancFolderImporter:
         logger.debug("Processing thread stopped")
 
     def _list_and_sort_dir(self, folder_path):
-        def sort_priority(name):
-            path = os.path.join(folder_path, name)
+        def sort_priority(path):
             if os.path.isdir(path):
-                contains_pdf = False
-                for _, _, file_names in os.walk(path):
-                    lower_names = [file_name.lower() for file_name in file_names]
-                    if any(file_name.endswith(".dcm") for file_name in lower_names):
-                        return 1
-                    contains_pdf |= any(
-                        file_name.endswith(".pdf") for file_name in lower_names
-                    )
-                return 2 if contains_pdf else 0
+                priorities = [
+                    sort_priority(os.path.join(path, name))
+                    for name in os.listdir(path)
+                ]
+                if 1 in priorities:
+                    return 1
+                return 2 if 2 in priorities else 0
             if zipfile.is_zipfile(path):
                 with zipfile.ZipFile(path, "r") as archive:
                     lower_names = [name.lower() for name in archive.namelist()]
@@ -318,15 +315,36 @@ class OrthancFolderImporter:
                     return 1
                 if any(name.endswith(".pdf") for name in lower_names):
                     return 2
-            if name.lower().endswith(".dcm"):
+            if path.lower().endswith(".dcm"):
                 return 1
-            if name.lower().endswith(".pdf"):
+            if path.lower().endswith(".pdf"):
                 return 2
             return 0
 
+        path_entries = os.listdir(path=folder_path)
+        extensions_by_stem = {}
+        for name in path_entries:
+            path = os.path.join(folder_path, name)
+            if os.path.isfile(path):
+                stem, extension = os.path.splitext(name.lower())
+                if extension in (".dcm", ".pdf"):
+                    extensions_by_stem.setdefault(stem, set()).add(extension)
+        paired_stems = {
+            stem
+            for stem, extensions in extensions_by_stem.items()
+            if extensions == {".dcm", ".pdf"}
+        }
+
+        def sort_key(name):
+            stem, extension = os.path.splitext(name.lower())
+            if stem in paired_stems and extension in (".dcm", ".pdf"):
+                return (0, 0, stem, 0 if extension == ".dcm" else 1, name.lower())
+            path = os.path.join(folder_path, name)
+            return (1, sort_priority(path), "", 0, name.lower())
+
         path_entries = sorted(
-            os.listdir(path=folder_path),
-            key=lambda name: (sort_priority(name), name.lower()),
+            path_entries,
+            key=sort_key,
         )
         return path_entries
 
