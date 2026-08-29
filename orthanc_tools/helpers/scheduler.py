@@ -152,9 +152,12 @@ class Scheduler:
             self._running_periods.load(schedule_configuration=json_schedule)
 
     def wait_right_time_to_run(self):
+        waited = False
         while not self._running_periods.is_in_period():
+            waited = True
             logger.info("waiting 10 min for the right scheduled time to come")
             time.sleep(600)
+        return waited
 
 
     def __str__(self):
