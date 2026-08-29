@@ -205,6 +205,18 @@ class TestWorklistFileSafety(unittest.TestCase):
 
             self.assertEqual([], os.listdir(temporary_dir))
 
+    def test_long_explicit_filename_uses_bounded_temporary_name(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            output_path = os.path.join(temporary_dir, f"{'a' * 220}.wl")
+
+            returned_path = DicomWorklistBuilder().generate(
+                self._values("safe-accession"),
+                file_name=output_path,
+            )
+
+            self.assertEqual(output_path, returned_path)
+            self.assertEqual("patient", pydicom.dcmread(output_path).PatientID)
+
     def test_sanitized_accession_numbers_do_not_collide(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             builder = DicomWorklistBuilder(folder=temporary_dir)

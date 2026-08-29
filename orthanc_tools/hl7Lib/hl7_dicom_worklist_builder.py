@@ -184,7 +184,7 @@ class DicomWorklistBuilder:
 
         temp_file_name = os.fspath(
             output_path.parent
-            / f".{output_path.name}.{secrets.token_hex(16)}.tmp"
+            / f".{secrets.token_hex(16)}.tmp"
         )
         temp_file_created = False
         try:
