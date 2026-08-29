@@ -1,6 +1,6 @@
 import argparse
 import logging
-from orthanc_api_client import OrthancApiClient
+from orthanc_api_client import OrthancApiClient, exceptions
 from typing import List
 import zipfile
 import tempfile
@@ -16,6 +16,19 @@ import threading
 # python -m orthanc_tools.orthanc_folder_importer --url=https://pacs.orthanc.team/orthanc/ --api_key=**************** --folder_path=C:\\Orthanc --state_path=C:\\orthanc-migration\\status.txt --errors_path=C:\\orthanc-migration\\errors.txt --max_retries=2
 
 logger = logging.getLogger(__name__)
+DEFAULT_ERRORS_LOG_FILENAME = "errors.txt"
+ORTHANC_READY_RECHECK_DELAY_SECONDS = 5
+ORTHANC_READY_MAX_CHECKS = 12
+
+
+def resolve_errors_path(errors_path: str = None, error_folder_path: str = None):
+    if errors_path:
+        return errors_path
+
+    if error_folder_path:
+        return os.path.join(error_folder_path, DEFAULT_ERRORS_LOG_FILENAME)
+
+    return None
 
 class OrthancFolderImporter:
     '''
@@ -33,13 +46,15 @@ class OrthancFolderImporter:
                  state_path: str,
                  labels_list: List[str] = None,
                  max_retries: int = 8,
-                 worker_threads_count: int = multiprocessing.cpu_count() - 1  # by default, use all CPUs but one for compression
+                 worker_threads_count: int = multiprocessing.cpu_count() - 1,  # by default, use all CPUs but one for compression
+                 skip_extensions: List[str] = None
                  ):
         self._api_client = api_client
         self._folder_path = folder_path
         self._labels_list = labels_list
         self._errors_path = errors_path # will contain the list of all the files path not correctly uploaded
         self._state_path = state_path # will contain the list of all the folders correctly uploaded
+        self._skip_extensions = [ext.lower() for ext in skip_extensions] if skip_extensions else []
 
         self._worker_threads_count = worker_threads_count
         self._worker_threads = []
@@ -53,11 +68,43 @@ class OrthancFolderImporter:
             self._max_retries = max_retries
 
         self._lock = threading.Lock()
+        self._orthanc_lock = threading.Lock()
+        self._next_orthanc_reconnect_attempt = 0
+
+    def _wait_until_orthanc_is_ready(self) -> bool:
+        """Pause briefly for transient outages and return whether Orthanc recovered."""
+        with self._orthanc_lock:
+            if self._api_client.is_alive():
+                self._next_orthanc_reconnect_attempt = 0
+                return True
+
+            if time.monotonic() < self._next_orthanc_reconnect_attempt:
+                return False
+
+            logger.warning("Orthanc is unreachable. Pausing all worker threads...")
+            for _ in range(ORTHANC_READY_MAX_CHECKS):
+                time.sleep(ORTHANC_READY_RECHECK_DELAY_SECONDS)
+                if self._api_client.is_alive():
+                    self._next_orthanc_reconnect_attempt = 0
+                    logger.info("Orthanc is back up! Resuming workers.")
+                    return True
+
+            self._next_orthanc_reconnect_attempt = (
+                time.monotonic() + ORTHANC_READY_RECHECK_DELAY_SECONDS
+            )
+            logger.error("Orthanc is still unreachable after waiting; treating this as a failed upload attempt.")
+            return False
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop()
 
     def add_file_name_in_errors_log(self, file_path):
+        if not self._errors_path:
+            logger.warning(f"No errors log path configured, skipping error logging for {file_path}")
+            return
+        errors_dir = os.path.dirname(self._errors_path)
+        if errors_dir:
+            os.makedirs(errors_dir, exist_ok=True)
         with open(self._errors_path, "at") as f:
             f.write(file_path + "\n")
 
@@ -76,6 +123,11 @@ class OrthancFolderImporter:
 
         # file path case
         if os.path.isfile(path_to_upload):
+            # check skip extensions
+            _, ext = os.path.splitext(path_to_upload)
+            if ext.lower() in self._skip_extensions:
+                logger.info(f"Skipping file with extension {ext}: {path_to_upload}")
+                return
 
             # zip file case
             if "zip" in path_to_upload and zipfile.is_zipfile(path_to_upload):
@@ -112,7 +164,14 @@ class OrthancFolderImporter:
                         instance_orthanc_ids = self._api_client.upload(buffer, ignore_errors=True)
 
                         if len(instance_orthanc_ids) == 0:
-                            logger.error(f"File not uploaded: {path_to_upload}.")
+                            # If we got nothing back, it might be a file error OR Orthanc is actually down
+                            # and the ignore_errors=True swallowed a connection error.
+                            if not self._api_client.is_alive():
+                                if self._wait_until_orthanc_is_ready():
+                                    continue # retry this same file
+                                raise exceptions.ConnectionError(f"Orthanc remained unreachable while uploading {path_to_upload}")
+
+                            logger.error(f"File not uploaded (likely invalid DICOM): {path_to_upload}.")
                             self.add_file_name_in_errors_log(file_path=path_to_upload)
                             break
                         # we label for each instance, not at the end of the study, so that there is never an unlabeled image in Orthanc
@@ -120,6 +179,22 @@ class OrthancFolderImporter:
                             study_orthanc_id = self._api_client.instances.get_parent_study_id(instance_orthanc_ids[0])
                             self._api_client.studies.add_labels(orthanc_id=study_orthanc_id, labels=self._labels_list)
                         break
+                    except (exceptions.ConnectionError, exceptions.OrthancApiException) as e:
+                        # Handle connection issues without consuming retry count
+                        if not self._api_client.is_alive():
+                            logger.warning(f"Connection error: {str(e)}. Waiting for Orthanc...")
+                            if self._wait_until_orthanc_is_ready():
+                                continue # Try the same file again
+
+                        # If it's a different Orthanc error (e.g. 400 Bad Request), treat as a normal retry/fail
+                        if retry_count == self._max_retries:
+                            logger.error(f"Error while uploading this file: {path_to_upload}. Exception: {str(e)}")
+                            logger.error(f"too many attempts, logging the file name...")
+                            self.add_file_name_in_errors_log(file_path=path_to_upload)
+                            break
+                        else:
+                            retry_count += 1
+                            logger.warning(f"Error while uploading this file, retrying...: {path_to_upload}. Exception: {str(e)}")
                     except Exception as e:
                         if retry_count == self._max_retries:
                             logger.error(f"Error while uploading this file: {path_to_upload}. Exception: {str(e)}")
@@ -227,6 +302,7 @@ if __name__ == '__main__':
     parser.add_argument('--state_path', type=str, help='Path of the file which will contain the list of all the folder correctly uploaded.')
     parser.add_argument('--max_retries', type=int, default=8, help='Maximum number of attempts for a file upload.')
     parser.add_argument('--worker_threads_count', type=int, default=1, help='Worker threads count')
+    parser.add_argument('--skip_extensions', type=str, default=None, help='List of extensions to skip, separated by a comma.')
 
     args = parser.parse_args()
 
@@ -236,10 +312,19 @@ if __name__ == '__main__':
     api_key = os.environ.get("ORTHANC_API_KEY", args.api_key)
     folder_path = os.environ.get("FOLDER_PATH", args.folder_path)
     labels_list = os.environ.get("LABELS_LIST", args.labels_list)
-    errors_path = os.environ.get("ERRORS_PATH", args.errors_path)
-    state_path = os.environ.get("STATE_PATH", args.state_path)
+    errors_path = resolve_errors_path(
+        errors_path=os.environ.get("ERRORS_PATH", args.errors_path),
+        error_folder_path=os.environ.get("ERROR_FOLDER_PATH")
+    )
+    state_path = os.environ.get("STATE_PATH", os.environ.get("PERSIST_STATE_PATH", args.state_path))
     max_retries = int(os.environ.get("MAX_RETRIES", str(args.max_retries)))
     worker_threads_count = int(os.environ.get("WORKER_THREADS_COUNT", str(args.worker_threads_count)))
+    skip_extensions = os.environ.get("SKIP_EXTENSIONS", args.skip_extensions)
+
+    if skip_extensions:
+        skip_extensions = [ext.strip() for ext in skip_extensions.split(",") if ext.strip()]
+    else:
+        skip_extensions = []
 
     o = None
     if api_key is not None:
@@ -254,7 +339,8 @@ if __name__ == '__main__':
         errors_path=errors_path,
         state_path=state_path,
         max_retries=max_retries,
-        worker_threads_count=worker_threads_count
+        worker_threads_count=worker_threads_count,
+        skip_extensions=skip_extensions
     )
 
     importer.execute()

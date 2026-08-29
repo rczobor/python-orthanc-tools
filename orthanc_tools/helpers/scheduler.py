@@ -5,7 +5,11 @@ import json
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict
 from datetime import datetime
-from zoneinfo import ZoneInfo
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - exercised only on Python 3.8
+    from backports.zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +18,7 @@ logger = logging.getLogger(__name__)
 class RunningPeriod:
     from_hour: int
     to_hour: int
-    weekday: int  # 0=Sunday, 1=Monday, ..., 6=Saturday
+    weekday: int  # 0=Monday, 1=Tuesday, ..., 6=Sunday
     timezone: ZoneInfo = ZoneInfo("Etc/UTC")
 
     def __init__(self, weekday: int, period: str, timezone: ZoneInfo):
@@ -104,7 +108,7 @@ class RunningPeriods:
                 if from_day >= to_day:
                     raise ValueError(f"Invalid schedule: from_day >= to_day: {from_day} >= {to_day} ({weekday})")
 
-                weekdays = range(from_day, to_day)
+                weekdays = range(from_day, to_day + 1)
             else:
                 weekdays = [RunningPeriod.day_from_string(weekday)]
 
@@ -163,7 +167,7 @@ class Scheduler:
         parser.add_argument('--night_start_hour', type=int, default=19, help='Night start hour')
         parser.add_argument('--night_end_hour', type=int, default=6, help='Night start hour')
         parser.add_argument('--run_schedule', type=str, default=None, help='Run on schedule sample: {"Monday": ["0-6", "20-24"], .., "Sunday": ["0-24"]}')
-        parser.add_argument('--timezone', type=str, default="Utc/UTC", help='Timezone for the schedule')
+        parser.add_argument('--timezone', type=str, default="Etc/UTC", help='Timezone for the schedule')
 
     @classmethod
     def create_from_args_and_env_var(cls, args):
@@ -175,7 +179,11 @@ class Scheduler:
             run_only_at_night_and_weekend = os.environ.get("RUN_ONLY_AT_NIGHT_AND_WEEKEND") == "true"
         else:
             run_only_at_night_and_weekend = args.run_only_at_night_and_weekend
-        run_schedule = json.loads(os.environ.get("RUN_SCHEDULE", str(args.run_schedule)))
+        run_schedule_value = os.environ.get("RUN_SCHEDULE", args.run_schedule)
+        if isinstance(run_schedule_value, str):
+            run_schedule = json.loads(run_schedule_value)
+        else:
+            run_schedule = run_schedule_value
 
         return Scheduler(
             night_start_hour=night_start_hour,
