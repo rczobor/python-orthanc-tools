@@ -1,4 +1,5 @@
 import argparse
+import copy
 import threading
 import time
 
@@ -9,6 +10,8 @@ import os
 from orthanc_api_client import OrthancApiClient, ResourceType, JobStatus, ResourceNotFound
 
 logger = logging.getLogger(__name__)
+BROKER_SETUP_TIMEOUT = 5
+CONSUMER_STOP_TIMEOUT = 10
 
 class OrthancReplicator:
     '''
@@ -68,8 +71,27 @@ class OrthancReplicator:
         self._destination = destination
         self._broker_params = broker_params
         self._consuming_thread = None
+        self._connection = None
+        self._state_lock = threading.Lock()
 
         self._stop_requested = False
+
+    def _bounded_broker_params(self):
+        params = copy.copy(self._broker_params)
+        params.connection_attempts = 1
+        params.stack_timeout = min(
+            params.stack_timeout or BROKER_SETUP_TIMEOUT,
+            BROKER_SETUP_TIMEOUT,
+        )
+        params.socket_timeout = min(
+            params.socket_timeout or BROKER_SETUP_TIMEOUT,
+            params.stack_timeout,
+        )
+        params.blocked_connection_timeout = min(
+            params.blocked_connection_timeout or BROKER_SETUP_TIMEOUT,
+            BROKER_SETUP_TIMEOUT,
+        )
+        return params
 
     def to_delete_callback(self, channel, method, properties, body):
         orthanc_id = body.decode('utf8')
@@ -151,10 +173,19 @@ class OrthancReplicator:
 
         # we want the replicator to retry to connect to the broker if there is a trouble...
         while not self._stop_requested:
+            connection = None
+            channel = None
             try:
 
                 # initialize connection to rabbitmq
-                connection = pika.BlockingConnection(self._broker_params)
+                connection = pika.BlockingConnection(self._bounded_broker_params())
+
+                with self._state_lock:
+                    if self._stop_requested:
+                        connection.close()
+                        return
+                    self._connection = connection
+
                 channel = connection.channel()
 
                 # These steps should have been done in the lua, but they are idempotent
@@ -195,41 +226,50 @@ class OrthancReplicator:
                 channel.basic_consume(queue='to-forward-queue', on_message_callback=self.to_forward_callback)
                 channel.basic_consume(queue='to-delete-queue', on_message_callback=self.to_delete_callback)
 
-                # we declare a "stop-queue" which allows to gracefully stop the connection with rabbitmq
-                channel.queue_declare(queue='stop-queue')
-                channel.queue_bind(exchange="orthanc-exchange", queue="stop-queue", routing_key="stop-queue")
-                channel.basic_consume(queue='stop-queue', on_message_callback=self.stop_callback, auto_ack=True)
+                with self._state_lock:
+                    if self._stop_requested:
+                        return
 
                 logger.info("Broker connection configured, waiting for messages...")
                 channel.start_consuming() # this never ends
 
-                channel.stop_consuming()
-                connection.close()
-
             except Exception as e:
-                logger.info("Broker consuming error, will retry soon...")
-                time.sleep(1)
-
-    def stop_callback(self, channel, method, properties, body):
-        channel.stop_consuming()
-        channel.close()
-
-        logger.info("Broker connection stop requested...")
+                if not self._stop_requested:
+                    logger.info("Broker consuming error, will retry soon...")
+                    time.sleep(1)
+            finally:
+                with self._state_lock:
+                    if self._connection is connection:
+                        self._connection = None
+                if connection is not None and connection.is_open:
+                    connection.close()
 
     def stop(self):
         logger.info("Stopping Replicator...")
-        self._stop_requested = True
+        with self._state_lock:
+            self._stop_requested = True
+            connection = self._connection
 
-        connection = pika.BlockingConnection(self._broker_params)
-        channel = connection.channel()
+        if connection is not None and connection.is_open:
+            try:
+                connection.add_callback_threadsafe(connection.close)
+            except pika.exceptions.ConnectionWrongStateError:
+                pass
 
-        channel.basic_publish(exchange='orthanc-exchange', routing_key='stop-queue', body="stop")
-
-        connection.close()
+        if self._consuming_thread is not None:
+            self._consuming_thread.join(CONSUMER_STOP_TIMEOUT)
+            if self._consuming_thread.is_alive():
+                logger.error("Replicator consumer thread did not stop before the shutdown deadline")
 
     def execute(self):
-        self._consuming_thread = threading.Thread(target=self._consume)
+        # Pika's blocking setup RPCs cannot process a thread-safe close callback.
+        # A daemon thread keeps a stuck broker RPC from preventing process exit.
+        self._consuming_thread = threading.Thread(target=self._consume, daemon=True)
         self._consuming_thread.start()
+
+    def wait(self):
+        if self._consuming_thread is not None:
+            self._consuming_thread.join()
 
 # example:
 # python orthanc_tools/orthanc_replicator.py --source_url=http://localhost:8042 --dest_url=http://localhost:8044 --broker_url=http://localhost
@@ -299,6 +339,7 @@ if __name__ == '__main__':
     )
 
     replicator.execute()
+    replicator.wait()
 
 
 
