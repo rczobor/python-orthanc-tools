@@ -270,6 +270,23 @@ class TestWorklistFileSafety(unittest.TestCase):
             self.assertTrue(os.path.islink(link_path))
             self.assertEqual("patient", pydicom.dcmread(target_path).PatientID)
 
+    def test_hard_linked_destination_updates_all_links(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            output_path = os.path.join(temporary_dir, "safe-accession.wl")
+            linked_path = os.path.join(temporary_dir, "linked.wl")
+            with open(output_path, "wb") as output_file:
+                output_file.write(b"existing")
+            try:
+                os.link(output_path, linked_path)
+            except (OSError, NotImplementedError) as ex:
+                self.skipTest(f"hard links are unavailable: {ex}")
+
+            builder = DicomWorklistBuilder(folder=temporary_dir)
+            builder.generate(self._values("safe-accession"))
+
+            self.assertEqual("patient", pydicom.dcmread(linked_path).PatientID)
+            self.assertEqual(os.stat(output_path).st_ino, os.stat(linked_path).st_ino)
+
     @unittest.skipUnless(
         all(hasattr(os, name) for name in ("listxattr", "getxattr", "setxattr")),
         "extended attributes are unavailable",

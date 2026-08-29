@@ -148,6 +148,9 @@ class DicomWorklistBuilder:
             output_stat = output_path.stat()
         except FileNotFoundError:
             output_stat = None
+        if output_stat is not None and output_stat.st_nlink > 1:
+            ds.save_as(output_path, enforce_file_format=True)
+            return file_name
 
         temp_file_name = os.fspath(
             output_path.parent
