@@ -209,6 +209,31 @@ class TestOrthancSyncherSafety(unittest.TestCase):
             )
             self.assertEqual(["status.txt"], os.listdir(temp_dir))
 
+    def test_hard_linked_checkpoint_updates_all_links(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            status_path = Path(temp_dir, "status.txt")
+            linked_path = Path(temp_dir, "linked.txt")
+            status_path.write_text(
+                "2026-08-01 01:02:03\n2026-08-02 04:05:06\n",
+                encoding="utf-8",
+            )
+            try:
+                os.link(status_path, linked_path)
+            except (OSError, NotImplementedError) as ex:
+                self.skipTest(f"hard links are unavailable: {ex}")
+            syncher = self._syncher(persist_status_path=os.fspath(status_path))
+
+            syncher.save_last_update_limit(
+                datetime.datetime(2026, 8, 3, 7, 8, 9),
+                0,
+            )
+
+            self.assertEqual(
+                ["2026-08-03 07:08:09", "2026-08-02 04:05:06"],
+                linked_path.read_text(encoding="utf-8").splitlines(),
+            )
+            self.assertEqual(os.stat(status_path).st_ino, os.stat(linked_path).st_ino)
+
     def test_empty_transfer_is_a_no_op(self):
         source = mock.MagicMock()
         destination = mock.MagicMock()

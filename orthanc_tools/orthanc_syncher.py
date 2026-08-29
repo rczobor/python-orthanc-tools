@@ -136,6 +136,10 @@ class OrthancSyncher:
                 status_file.flush()
                 os.fsync(status_file.fileno())
 
+        if status_metadata is not None and status_metadata.st_nlink > 1:
+            write_in_place()
+            return
+
         try:
             temp_file_descriptor, temp_file_path = tempfile.mkstemp(
                 dir=status_folder,
