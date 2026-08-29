@@ -36,6 +36,18 @@ def _write_in_place(ds, output_path, expected_stat):
             os.close(output_fd)
 
 
+def _unlink_if_same_file(path, expected_stat):
+    try:
+        current_stat = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if (
+        current_stat.st_dev == expected_stat.st_dev
+        and current_stat.st_ino == expected_stat.st_ino
+    ):
+        os.unlink(path)
+
+
 class DicomElementType(Enum):
     MANDATORY = 1  # for dicom tags that must be there (type 1 or 1c) -> throw an exception if not present
     REQUIRED = 2  # for dicom tags that are mandatory but accepts null value (type 2 or 2c)
@@ -240,41 +252,65 @@ class DicomWorklistBuilder:
             output_path.parent
             / f".{secrets.token_hex(16)}.tmp"
         )
-        temp_file_created = False
+        temp_file_stat = None
         try:
             with open(temp_file_name, "xb") as temp_file:
-                temp_file_created = True
+                temp_file_stat = os.fstat(temp_file.fileno())
                 ds.save_as(temp_file, enforce_file_format=True)
-            if output_stat is not None:
-                if hasattr(os, "chown"):
-                    os.chown(temp_file_name, output_stat.st_uid, output_stat.st_gid)
-                os.chmod(temp_file_name, stat.S_IMODE(output_stat.st_mode))
-                if all(
-                    hasattr(os, name)
-                    for name in ("listxattr", "getxattr", "setxattr")
-                ):
-                    try:
-                        attribute_names = os.listxattr(output_path)
-                    except OSError as ex:
-                        if ex.errno != errno.ENOTSUP:
-                            raise
-                        attribute_names = []
-                    for attribute_name in attribute_names:
-                        os.setxattr(
-                            temp_file_name,
-                            attribute_name,
-                            os.getxattr(output_path, attribute_name),
+                if output_stat is not None:
+                    if hasattr(os, "fchown"):
+                        os.fchown(
+                            temp_file.fileno(),
+                            output_stat.st_uid,
+                            output_stat.st_gid,
                         )
+                    elif hasattr(os, "chown"):
+                        os.chown(
+                            temp_file_name,
+                            output_stat.st_uid,
+                            output_stat.st_gid,
+                        )
+                    if hasattr(os, "fchmod"):
+                        os.fchmod(
+                            temp_file.fileno(),
+                            stat.S_IMODE(output_stat.st_mode),
+                        )
+                    else:
+                        os.chmod(temp_file_name, stat.S_IMODE(output_stat.st_mode))
+                    if all(
+                        hasattr(os, name)
+                        for name in ("listxattr", "getxattr", "setxattr")
+                    ):
+                        try:
+                            attribute_names = os.listxattr(output_path)
+                        except OSError as ex:
+                            if ex.errno != errno.ENOTSUP:
+                                raise
+                            attribute_names = []
+                        for attribute_name in attribute_names:
+                            os.setxattr(
+                                temp_file.fileno(),
+                                attribute_name,
+                                os.getxattr(output_path, attribute_name),
+                            )
+            promoted_stat = os.lstat(temp_file_name)
+            if (
+                not stat.S_ISREG(promoted_stat.st_mode)
+                or promoted_stat.st_dev != temp_file_stat.st_dev
+                or promoted_stat.st_ino != temp_file_stat.st_ino
+            ):
+                raise ValueError("Temporary worklist changed before promotion")
             os.replace(temp_file_name, output_path)
+            temp_file_stat = None
         except PermissionError:
-            if temp_file_created and os.path.exists(temp_file_name):
-                os.unlink(temp_file_name)
+            if temp_file_stat is not None:
+                _unlink_if_same_file(temp_file_name, temp_file_stat)
             if output_stat is None:
                 raise
             _write_in_place(ds, output_path, output_stat)
         except OSError as ex:
-            if temp_file_created and os.path.exists(temp_file_name):
-                os.unlink(temp_file_name)
+            if temp_file_stat is not None:
+                _unlink_if_same_file(temp_file_name, temp_file_stat)
             if (
                 output_stat is not None
                 and ex.errno in {errno.EBUSY, errno.EROFS, errno.ENOTSUP}
@@ -283,8 +319,8 @@ class DicomWorklistBuilder:
                 return file_name
             raise
         except Exception:
-            if temp_file_created and os.path.exists(temp_file_name):
-                os.unlink(temp_file_name)
+            if temp_file_stat is not None:
+                _unlink_if_same_file(temp_file_name, temp_file_stat)
             raise
 
         return file_name

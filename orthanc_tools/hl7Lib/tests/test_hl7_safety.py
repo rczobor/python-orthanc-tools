@@ -306,7 +306,7 @@ class TestWorklistFileSafety(unittest.TestCase):
 
             self.assertEqual(0o600, stat.S_IMODE(os.stat(output_path).st_mode))
 
-    @unittest.skipUnless(hasattr(os, "chown"), "ownership changes are unavailable")
+    @unittest.skipUnless(hasattr(os, "fchown"), "ownership changes are unavailable")
     def test_replacement_falls_back_when_owner_cannot_be_assumed(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             output_path = os.path.join(temporary_dir, "safe-accession.wl")
@@ -315,7 +315,7 @@ class TestWorklistFileSafety(unittest.TestCase):
 
             builder = DicomWorklistBuilder(folder=temporary_dir)
             with mock.patch(
-                "orthanc_tools.hl7Lib.hl7_dicom_worklist_builder.os.chown",
+                "orthanc_tools.hl7Lib.hl7_dicom_worklist_builder.os.fchown",
                 side_effect=PermissionError("foreign owner"),
             ):
                 builder.generate(self._values("safe-accession"))
@@ -326,6 +326,7 @@ class TestWorklistFileSafety(unittest.TestCase):
                 os.listdir(temporary_dir),
             )
 
+    @unittest.skipUnless(hasattr(os, "fchown"), "ownership changes are unavailable")
     def test_metadata_fallback_rejects_destination_swap(self):
         with tempfile.TemporaryDirectory() as parent_dir:
             worklist_dir = os.path.join(parent_dir, "worklists")
@@ -344,7 +345,7 @@ class TestWorklistFileSafety(unittest.TestCase):
 
             builder = DicomWorklistBuilder(folder=worklist_dir)
             with mock.patch(
-                "orthanc_tools.hl7Lib.hl7_dicom_worklist_builder.os.chown",
+                "orthanc_tools.hl7Lib.hl7_dicom_worklist_builder.os.fchown",
                 side_effect=PermissionError("foreign owner"),
             ), mock.patch(
                 "orthanc_tools.hl7Lib.hl7_dicom_worklist_builder.os.open",
@@ -354,6 +355,34 @@ class TestWorklistFileSafety(unittest.TestCase):
                     builder.generate(self._values("safe-accession"))
 
             self.assertEqual(b"outside", Path(outside_path).read_bytes())
+
+    @unittest.skipUnless(hasattr(os, "fchown"), "descriptor ownership is unavailable")
+    def test_temporary_metadata_rejects_replaced_entry(self):
+        with tempfile.TemporaryDirectory() as parent_dir:
+            worklist_dir = Path(parent_dir) / "worklists"
+            worklist_dir.mkdir()
+            output_path = worklist_dir / "safe-accession.wl"
+            outside_path = Path(parent_dir) / "outside.wl"
+            output_path.write_bytes(b"existing")
+            outside_path.write_bytes(b"outside")
+            original_fchown = os.fchown
+
+            def replace_temporary_entry(fd, uid, gid):
+                original_fchown(fd, uid, gid)
+                temp_path = next(worklist_dir.glob(".*.tmp"))
+                temp_path.unlink()
+                temp_path.symlink_to(outside_path)
+
+            builder = DicomWorklistBuilder(folder=os.fspath(worklist_dir))
+            with mock.patch(
+                "orthanc_tools.hl7Lib.hl7_dicom_worklist_builder.os.fchown",
+                side_effect=replace_temporary_entry,
+            ):
+                with self.assertRaisesRegex(ValueError, "changed before promotion"):
+                    builder.generate(self._values("safe-accession"))
+
+            self.assertEqual(b"outside", outside_path.read_bytes())
+            self.assertEqual(b"existing", output_path.read_bytes())
 
     def test_explicit_symlink_updates_its_target(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
