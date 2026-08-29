@@ -22,6 +22,10 @@ ORU_MESSAGE = (
     r"MSH|^~\&|SENDER|FACILITY|RECEIVER|DESTINATION|20260730120000||"
     "ORU^R01|oru-message-id|P|2.3\rPID|1"
 )
+UNKNOWN_MESSAGE = (
+    r"MSH|^~\&|SENDER|FACILITY|RECEIVER|DESTINATION|20260730120000||"
+    "-------|unknown-message-id|P|2.3\rPID|1"
+)
 
 
 class FakeParser:
@@ -110,6 +114,16 @@ class TestHl7Acknowledgements(unittest.TestCase):
         self.assertEqual("AR", response["MSA.F1.R1"])
         self.assertEqual("unsupported | message", response["MSA.F3.R1"])
 
+    def test_error_acknowledgement_defaults_missing_trigger_event(self):
+        response = handle_error_message(
+            UNKNOWN_MESSAGE,
+            error_description="unsupported message",
+        )
+
+        self.assertEqual("AR", response["MSA.F1.R1"])
+        self.assertEqual("ACK", response["MSH.F9.R1.C1"])
+        self.assertEqual("O01", response["MSH.F9.R1.C2"])
+
 
 class TestMllpClientWrites(unittest.TestCase):
     def test_send_uses_sendall(self):
@@ -181,6 +195,15 @@ class TestWorklistFileSafety(unittest.TestCase):
             self.assertTrue(os.path.isfile(spaced_path))
             self.assertTrue(os.path.isfile(underscored_path))
 
+    def test_missing_accession_number_uses_generated_uid_filename(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            builder = DicomWorklistBuilder(folder=temporary_dir)
+
+            output_path = builder.generate(self._values(None))
+
+            self.assertTrue(os.path.isfile(output_path))
+            self.assertNotEqual(".wl", os.path.basename(output_path))
+
     @unittest.skipIf(os.name == "nt", "Windows does not preserve POSIX permission bits")
     def test_new_worklist_respects_process_umask(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -205,6 +228,28 @@ class TestWorklistFileSafety(unittest.TestCase):
             builder.generate(self._values("safe-accession"))
 
             self.assertEqual(0o600, stat.S_IMODE(os.stat(output_path).st_mode))
+
+    @unittest.skipUnless(
+        all(hasattr(os, name) for name in ("listxattr", "getxattr", "setxattr")),
+        "extended attributes are unavailable",
+    )
+    def test_replacing_worklist_preserves_extended_attributes(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            output_path = os.path.join(temporary_dir, "safe-accession.wl")
+            with open(output_path, "wb") as output_file:
+                output_file.write(b"existing")
+            try:
+                os.setxattr(output_path, "user.orthanc-test", b"preserve")
+            except OSError as ex:
+                self.skipTest(f"extended attributes are unavailable: {ex}")
+
+            builder = DicomWorklistBuilder(folder=temporary_dir)
+            builder.generate(self._values("safe-accession"))
+
+            self.assertEqual(
+                b"preserve",
+                os.getxattr(output_path, "user.orthanc-test"),
+            )
 
 
 if __name__ == "__main__":

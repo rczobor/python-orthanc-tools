@@ -26,7 +26,11 @@ def build_acknowledgement(
         raise ValueError(f"Unsupported HL7 acknowledgment status: {status}")
 
     hl7_request = request if isinstance(request, hl7.Message) else hl7.parse(request)
-    trigger_event = str(hl7_request["MSH.F9.R1.C2"]) or "O01"
+    try:
+        trigger_event = str(hl7_request["MSH.F9.R1.C2"])
+    except (IndexError, KeyError):
+        trigger_event = "O01"
+    trigger_event = trigger_event or "O01"
 
     msh = (
         "MSH|^~\\&|{sending_application}|{sending_facility}|{receiving_application}|"

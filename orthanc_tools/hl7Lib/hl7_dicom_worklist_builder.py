@@ -128,8 +128,8 @@ class DicomWorklistBuilder:
         ds = self.customize(ds)
 
         if file_name is None:  # if no filename provided, save in the folder
-            accession_number = str(ds.AccessionNumber)
-            safe_accession_number = quote(accession_number, safe="._-")
+            filename_source = str(ds.AccessionNumber) or str(ds.SOPInstanceUID)
+            safe_accession_number = quote(filename_source, safe="._-")
             if safe_accession_number in {".", ".."}:
                 safe_accession_number = safe_accession_number.replace(".", "%2E")
             if not safe_accession_number:
@@ -143,9 +143,9 @@ class DicomWorklistBuilder:
 
         output_path = Path(file_name)
         try:
-            output_mode = stat.S_IMODE(output_path.stat().st_mode)
+            output_stat = output_path.stat()
         except FileNotFoundError:
-            output_mode = None
+            output_stat = None
 
         temp_file_name = os.fspath(
             output_path.parent
@@ -156,8 +156,20 @@ class DicomWorklistBuilder:
             with open(temp_file_name, "xb") as temp_file:
                 temp_file_created = True
                 ds.save_as(temp_file, enforce_file_format=True)
-            if output_mode is not None:
-                os.chmod(temp_file_name, output_mode)
+            if output_stat is not None:
+                if hasattr(os, "chown"):
+                    os.chown(temp_file_name, output_stat.st_uid, output_stat.st_gid)
+                os.chmod(temp_file_name, stat.S_IMODE(output_stat.st_mode))
+                if all(
+                    hasattr(os, name)
+                    for name in ("listxattr", "getxattr", "setxattr")
+                ):
+                    for attribute_name in os.listxattr(output_path):
+                        os.setxattr(
+                            temp_file_name,
+                            attribute_name,
+                            os.getxattr(output_path, attribute_name),
+                        )
             os.replace(temp_file_name, output_path)
         except Exception:
             if temp_file_created and os.path.exists(temp_file_name):
