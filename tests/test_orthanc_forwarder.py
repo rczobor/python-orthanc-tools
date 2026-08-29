@@ -282,6 +282,18 @@ class TestOrthancForwarderLogContext(unittest.TestCase):
 
 class TestOrthancForwarderFilteringBehavior(unittest.TestCase):
 
+    def test_terminal_marker_uses_the_orthanc_study_id(self):
+        source = mock.MagicMock()
+        source.studies.get.return_value.last_update = "20260829T120000"
+        forwarder = OrthancForwarder(source=source, destinations=[])
+        instances_set = FakeInstancesSet()
+        instances_set.id = "internal-set-id"
+        instances_set.study_id = "orthanc-study-id"
+
+        forwarder._terminal_marker(instances_set)
+
+        source.studies.get.assert_called_once_with("orthanc-study-id")
+
     def test_processing_failure_is_retried_without_forwarding_or_deleting(self):
         instance_processor = mock.Mock(
             side_effect=exceptions.OrthancApiException("processing failed")
