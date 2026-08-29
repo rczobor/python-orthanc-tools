@@ -234,6 +234,33 @@ class TestOrthancSyncherSafety(unittest.TestCase):
             )
             self.assertEqual(os.stat(status_path).st_ino, os.stat(linked_path).st_ino)
 
+    @unittest.skipUnless(
+        all(hasattr(os, name) for name in ("listxattr", "getxattr", "setxattr")),
+        "extended attributes are unavailable",
+    )
+    def test_unsupported_checkpoint_xattrs_do_not_block_update(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            status_path = Path(temp_dir, "status.txt")
+            status_path.write_text(
+                "2026-08-01 01:02:03\n2026-08-02 04:05:06\n",
+                encoding="utf-8",
+            )
+            syncher = self._syncher(persist_status_path=os.fspath(status_path))
+
+            with mock.patch(
+                "orthanc_tools.orthanc_syncher.os.listxattr",
+                side_effect=OSError(errno.ENOTSUP, "xattrs unsupported"),
+            ):
+                syncher.save_last_update_limit(
+                    datetime.datetime(2026, 8, 3, 7, 8, 9),
+                    0,
+                )
+
+            self.assertEqual(
+                ["2026-08-03 07:08:09", "2026-08-02 04:05:06"],
+                status_path.read_text(encoding="utf-8").splitlines(),
+            )
+
     def test_empty_transfer_is_a_no_op(self):
         source = mock.MagicMock()
         destination = mock.MagicMock()

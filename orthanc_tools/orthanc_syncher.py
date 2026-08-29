@@ -168,7 +168,13 @@ class OrthancSyncher:
                     hasattr(os, name)
                     for name in ("listxattr", "getxattr", "setxattr")
                 ):
-                    for attribute_name in os.listxattr(status_path):
+                    try:
+                        attribute_names = os.listxattr(status_path)
+                    except OSError as ex:
+                        if ex.errno != errno.ENOTSUP:
+                            raise
+                        attribute_names = []
+                    for attribute_name in attribute_names:
                         os.setxattr(
                             temp_file_path,
                             attribute_name,
