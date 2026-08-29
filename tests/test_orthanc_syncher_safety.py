@@ -88,6 +88,56 @@ class TestOrthancSyncherSafety(unittest.TestCase):
 
             self.assertEqual(0o640, stat.S_IMODE(os.stat(status_path).st_mode))
 
+    @unittest.skipUnless(hasattr(os, "chown"), "ownership changes are unavailable")
+    def test_status_update_falls_back_when_owner_cannot_be_assumed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            status_path = Path(temp_dir, "status.txt")
+            status_path.write_text(
+                "2026-08-01 01:02:03\n2026-08-02 04:05:06\n",
+                encoding="utf-8",
+            )
+            syncher = self._syncher(persist_status_path=os.fspath(status_path))
+
+            with mock.patch(
+                "orthanc_tools.orthanc_syncher.os.chown",
+                side_effect=PermissionError("foreign owner"),
+            ):
+                syncher.save_last_update_limit(
+                    datetime.datetime(2026, 8, 3, 7, 8, 9),
+                    0,
+                )
+
+            self.assertEqual(
+                ["2026-08-03 07:08:09", "2026-08-02 04:05:06"],
+                status_path.read_text(encoding="utf-8").splitlines(),
+            )
+            self.assertEqual(["status.txt"], os.listdir(temp_dir))
+
+    def test_status_update_preserves_explicit_symlink(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            status_target = Path(temp_dir, "target.txt")
+            status_link = Path(temp_dir, "status.txt")
+            status_target.write_text(
+                "2026-08-01 01:02:03\n2026-08-02 04:05:06\n",
+                encoding="utf-8",
+            )
+            try:
+                os.symlink(status_target, status_link)
+            except (OSError, NotImplementedError) as ex:
+                self.skipTest(f"symbolic links are unavailable: {ex}")
+            syncher = self._syncher(persist_status_path=os.fspath(status_link))
+
+            syncher.save_last_update_limit(
+                datetime.datetime(2026, 8, 3, 7, 8, 9),
+                0,
+            )
+
+            self.assertTrue(status_link.is_symlink())
+            self.assertEqual(
+                ["2026-08-03 07:08:09", "2026-08-02 04:05:06"],
+                status_target.read_text(encoding="utf-8").splitlines(),
+            )
+
     def test_empty_transfer_is_a_no_op(self):
         source = mock.MagicMock()
         destination = mock.MagicMock()

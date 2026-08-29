@@ -118,8 +118,12 @@ class OrthancSyncher:
         return datetime.datetime(year=1950, month=1, day=1, hour=1, minute=1, second=1)
 
     def _write_status_values(self, last_update_values):
-        status_path = os.path.abspath(self._persist_status_path)
+        status_path = os.path.realpath(os.path.abspath(self._persist_status_path))
         status_folder = os.path.dirname(status_path)
+        status_lines = [
+            datetime.datetime.strftime(value, "%Y-%m-%d %H:%M:%S") + "\n"
+            for value in last_update_values
+        ]
         try:
             status_metadata = os.stat(status_path)
         except FileNotFoundError:
@@ -132,33 +136,39 @@ class OrthancSyncher:
         )
         try:
             with os.fdopen(temp_file_descriptor, "w") as status_file:
-                status_file.writelines(
-                    datetime.datetime.strftime(value, "%Y-%m-%d %H:%M:%S") + "\n"
-                    for value in last_update_values
-                )
+                status_file.writelines(status_lines)
                 status_file.flush()
                 os.fsync(status_file.fileno())
             if status_metadata is not None:
-                if hasattr(os, "chown"):
-                    os.chown(
-                        temp_file_path,
-                        status_metadata.st_uid,
-                        status_metadata.st_gid,
-                    )
-                os.chmod(temp_file_path, stat.S_IMODE(status_metadata.st_mode))
-                if all(
-                    hasattr(os, name)
-                    for name in ("listxattr", "getxattr", "setxattr")
-                ):
-                    for attribute_name in os.listxattr(status_path):
-                        os.setxattr(
+                try:
+                    if hasattr(os, "chown"):
+                        os.chown(
                             temp_file_path,
-                            attribute_name,
-                            os.getxattr(status_path, attribute_name),
+                            status_metadata.st_uid,
+                            status_metadata.st_gid,
                         )
+                    os.chmod(temp_file_path, stat.S_IMODE(status_metadata.st_mode))
+                    if all(
+                        hasattr(os, name)
+                        for name in ("listxattr", "getxattr", "setxattr")
+                    ):
+                        for attribute_name in os.listxattr(status_path):
+                            os.setxattr(
+                                temp_file_path,
+                                attribute_name,
+                                os.getxattr(status_path, attribute_name),
+                            )
+                except PermissionError:
+                    os.unlink(temp_file_path)
+                    temp_file_path = None
+                    with open(status_path, "w") as status_file:
+                        status_file.writelines(status_lines)
+                        status_file.flush()
+                        os.fsync(status_file.fileno())
+                    return
             os.replace(temp_file_path, status_path)
         except Exception:
-            if os.path.exists(temp_file_path):
+            if temp_file_path is not None and os.path.exists(temp_file_path):
                 os.unlink(temp_file_path)
             raise
 
