@@ -386,11 +386,10 @@ class OrthancFolderImporter:
         def pairing_stem(name):
             path = os.path.join(folder_path, name)
             base_name = os.path.basename(name.lower())
-            stem = (
-                os.path.splitext(base_name)[0]
-                if os.path.isfile(path)
-                else base_name
-            )
+            if os.path.isfile(path):
+                return os.path.splitext(base_name)[0]
+
+            stem = base_name
             for role in ("images", "reports", "image", "report", "dicom", "pdf"):
                 if stem == role:
                     return ""
@@ -400,22 +399,41 @@ class OrthancFolderImporter:
                         return stem[:-len(suffix)]
             return stem
 
-        dicom_stems = set()
         pdf_stems = set()
         direct_priorities = {}
+        entry_stems = {}
         for name in path_entries:
             path = os.path.join(folder_path, name)
             priority = sort_priority(path)
             direct_priorities[name] = priority
             stem = pairing_stem(name)
-            if priority == 1:
-                dicom_stems.add(stem)
-            elif priority == 2:
+            entry_stems[name] = stem
+            if priority == 2:
                 pdf_stems.add(stem)
-        paired_stems = dicom_stems & pdf_stems
+
+        entry_groups = {}
+        dicom_groups = set()
+        for name, stem in entry_stems.items():
+            priority = direct_priorities[name]
+            group = stem
+            if priority == 1 and stem not in pdf_stems:
+                candidates = [
+                    pdf_stem
+                    for pdf_stem in pdf_stems
+                    if any(
+                        stem.startswith(f"{pdf_stem}{separator}")
+                        for separator in ("-", "_", ".", " ")
+                    )
+                ]
+                if candidates:
+                    group = max(candidates, key=len)
+            entry_groups[name] = group
+            if priority == 1:
+                dicom_groups.add(group)
+        paired_stems = dicom_groups & pdf_stems
 
         def sort_key(name):
-            stem = pairing_stem(name)
+            stem = entry_groups[name]
             priority = direct_priorities[name]
             if stem in paired_stems and priority in (1, 2):
                 return (0, 0, stem, 0 if priority == 1 else 1, name.lower())
