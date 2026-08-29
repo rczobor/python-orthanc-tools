@@ -383,13 +383,7 @@ class OrthancFolderImporter:
                     expanded_entries.append(name)
             path_entries = expanded_entries
 
-        def pairing_stem(name):
-            path = os.path.join(folder_path, name)
-            base_name = os.path.basename(name.lower())
-            if os.path.isfile(path):
-                return os.path.splitext(base_name)[0]
-
-            stem = base_name
+        def strip_role_suffix(stem):
             for role in ("images", "reports", "image", "report", "dicom", "pdf"):
                 if stem == role:
                     return ""
@@ -399,7 +393,14 @@ class OrthancFolderImporter:
                         return stem[:-len(suffix)]
             return stem
 
-        pdf_stems = set()
+        def pairing_stem(name):
+            path = os.path.join(folder_path, name)
+            base_name = os.path.basename(name.lower())
+            if os.path.isfile(path):
+                return os.path.splitext(base_name)[0]
+
+            return strip_role_suffix(base_name)
+
         direct_priorities = {}
         entry_stems = {}
         for name in path_entries:
@@ -408,20 +409,47 @@ class OrthancFolderImporter:
             direct_priorities[name] = priority
             stem = pairing_stem(name)
             entry_stems[name] = stem
-            if priority == 2:
-                pdf_stems.add(stem)
 
-        entry_groups = {}
+        archive_groups = {
+            name: strip_role_suffix(stem)
+            for name, stem in entry_stems.items()
+            if os.path.splitext(os.path.basename(name.lower()))[1] == ".zip"
+        }
+        archive_dicom_groups = {
+            archive_groups[name]
+            for name in archive_groups
+            if direct_priorities[name] == 1
+        }
+        archive_report_groups = {
+            archive_groups[name]
+            for name in archive_groups
+            if direct_priorities[name] == 2
+        }
+        paired_archive_groups = archive_dicom_groups & archive_report_groups
+
+        entry_groups = {
+            name: (
+                archive_groups[name]
+                if archive_groups.get(name) in paired_archive_groups
+                else stem
+            )
+            for name, stem in entry_stems.items()
+        }
+        report_groups = {
+            entry_groups[name]
+            for name in entry_groups
+            if direct_priorities[name] == 2
+        }
         dicom_groups = set()
-        for name, stem in entry_stems.items():
+        for name, stem in entry_groups.items():
             priority = direct_priorities[name]
             group = stem
-            if priority == 1 and stem not in pdf_stems:
+            if priority == 1 and stem not in report_groups:
                 candidates = [
-                    pdf_stem
-                    for pdf_stem in pdf_stems
+                    report_group
+                    for report_group in report_groups
                     if any(
-                        stem.startswith(f"{pdf_stem}{separator}")
+                        stem.startswith(f"{report_group}{separator}")
                         for separator in ("-", "_", ".", " ")
                     )
                 ]
@@ -430,7 +458,7 @@ class OrthancFolderImporter:
             entry_groups[name] = group
             if priority == 1:
                 dicom_groups.add(group)
-        paired_stems = dicom_groups & pdf_stems
+        paired_stems = dicom_groups & report_groups
 
         def sort_key(name):
             stem = entry_groups[name]

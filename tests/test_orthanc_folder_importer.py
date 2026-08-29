@@ -775,6 +775,33 @@ class TestOrthancFolderImporter(unittest.TestCase):
             [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
         )
 
+    def test_split_image_report_archives_keep_their_study(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for study in ("a", "b"):
+                with zipfile.ZipFile(Path(temp_dir, f"{study}-images.zip"), "w") as archive:
+                    archive.writestr("image.dcm", b"dicom")
+                with zipfile.ZipFile(Path(temp_dir, f"{study}-reports.zip"), "w") as archive:
+                    archive.writestr("report.pdf", b"pdf")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            ["study-a", "study-b"],
+            [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
