@@ -229,6 +229,47 @@ class TestWorklistFileSafety(unittest.TestCase):
 
             self.assertEqual(0o600, stat.S_IMODE(os.stat(output_path).st_mode))
 
+    @unittest.skipUnless(hasattr(os, "chown"), "ownership changes are unavailable")
+    def test_replacement_falls_back_when_owner_cannot_be_assumed(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            output_path = os.path.join(temporary_dir, "safe-accession.wl")
+            with open(output_path, "wb") as output_file:
+                output_file.write(b"existing")
+
+            builder = DicomWorklistBuilder(folder=temporary_dir)
+            with mock.patch(
+                "orthanc_tools.hl7Lib.hl7_dicom_worklist_builder.os.chown",
+                side_effect=PermissionError("foreign owner"),
+            ):
+                builder.generate(self._values("safe-accession"))
+
+            self.assertEqual("patient", pydicom.dcmread(output_path).PatientID)
+            self.assertEqual(
+                ["safe-accession.wl"],
+                os.listdir(temporary_dir),
+            )
+
+    def test_explicit_symlink_updates_its_target(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            target_path = os.path.join(temporary_dir, "target.wl")
+            link_path = os.path.join(temporary_dir, "configured.wl")
+            with open(target_path, "wb") as target_file:
+                target_file.write(b"existing")
+            try:
+                os.symlink(target_path, link_path)
+            except (OSError, NotImplementedError) as ex:
+                self.skipTest(f"symbolic links are unavailable: {ex}")
+
+            builder = DicomWorklistBuilder()
+            returned_path = builder.generate(
+                self._values("safe-accession"),
+                file_name=link_path,
+            )
+
+            self.assertEqual(link_path, returned_path)
+            self.assertTrue(os.path.islink(link_path))
+            self.assertEqual("patient", pydicom.dcmread(target_path).PatientID)
+
     @unittest.skipUnless(
         all(hasattr(os, name) for name in ("listxattr", "getxattr", "setxattr")),
         "extended attributes are unavailable",

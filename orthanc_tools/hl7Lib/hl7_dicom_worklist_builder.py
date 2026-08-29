@@ -142,6 +142,8 @@ class DicomWorklistBuilder:
             file_name = os.fspath(output_path)
 
         output_path = Path(file_name)
+        if output_path.is_symlink():
+            output_path = output_path.resolve()
         try:
             output_stat = output_path.stat()
         except FileNotFoundError:
@@ -157,19 +159,25 @@ class DicomWorklistBuilder:
                 temp_file_created = True
                 ds.save_as(temp_file, enforce_file_format=True)
             if output_stat is not None:
-                if hasattr(os, "chown"):
-                    os.chown(temp_file_name, output_stat.st_uid, output_stat.st_gid)
-                os.chmod(temp_file_name, stat.S_IMODE(output_stat.st_mode))
-                if all(
-                    hasattr(os, name)
-                    for name in ("listxattr", "getxattr", "setxattr")
-                ):
-                    for attribute_name in os.listxattr(output_path):
-                        os.setxattr(
-                            temp_file_name,
-                            attribute_name,
-                            os.getxattr(output_path, attribute_name),
-                        )
+                try:
+                    if hasattr(os, "chown"):
+                        os.chown(temp_file_name, output_stat.st_uid, output_stat.st_gid)
+                    os.chmod(temp_file_name, stat.S_IMODE(output_stat.st_mode))
+                    if all(
+                        hasattr(os, name)
+                        for name in ("listxattr", "getxattr", "setxattr")
+                    ):
+                        for attribute_name in os.listxattr(output_path):
+                            os.setxattr(
+                                temp_file_name,
+                                attribute_name,
+                                os.getxattr(output_path, attribute_name),
+                            )
+                except PermissionError:
+                    os.unlink(temp_file_name)
+                    temp_file_created = False
+                    ds.save_as(output_path, enforce_file_format=True)
+                    return file_name
             os.replace(temp_file_name, output_path)
         except Exception:
             if temp_file_created and os.path.exists(temp_file_name):
