@@ -281,11 +281,14 @@ class OrthancFolderImporter:
                             continue
                         processed_archive_groups.add(archive_group)
                         with tempfile.TemporaryDirectory() as temp_dir:
+                            role_indexes = {1: 0, 2: 0}
                             for archive_name, priority in archive_group:
                                 role_dir = os.path.join(
                                     temp_dir,
                                     "images" if priority == 1 else "reports",
+                                    str(role_indexes[priority]),
                                 )
+                                role_indexes[priority] += 1
                                 os.makedirs(role_dir, exist_ok=True)
                                 archive_path = os.path.join(path_to_upload, archive_name)
                                 with zipfile.ZipFile(archive_path, "r") as archive:
@@ -439,6 +442,10 @@ class OrthancFolderImporter:
             role_names = {"image", "images", "dicom", "report", "reports", "pdf", "pdfs"}
             if parent_parts and parent_parts[0] in role_names:
                 parent_parts = parent_parts[1:]
+            elif parent_parts:
+                normalized_parent = self._strip_role_suffix(parent_parts[0])
+                if normalized_parent != parent_parts[0]:
+                    parent_parts = (normalized_parent,) + parent_parts[1:]
             group = (parent_parts, self._strip_role_suffix(stem))
             groups.setdefault(group, []).append((name, priority))
 
