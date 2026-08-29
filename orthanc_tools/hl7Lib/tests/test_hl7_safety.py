@@ -419,6 +419,44 @@ class TestWorklistFileSafety(unittest.TestCase):
 
             self.assertEqual(b"outside", Path(outside_path).read_bytes())
 
+    def test_automatic_parent_symlink_swap_cannot_escape_worklist_folder(self):
+        with tempfile.TemporaryDirectory() as parent_dir:
+            worklist_dir = Path(parent_dir) / "worklists"
+            inside_dir = worklist_dir / "inside"
+            outside_dir = Path(parent_dir) / "outside"
+            archive_link = worklist_dir / "archive"
+            worklist_dir.mkdir()
+            inside_dir.mkdir()
+            outside_dir.mkdir()
+            try:
+                archive_link.symlink_to(inside_dir, target_is_directory=True)
+            except (OSError, NotImplementedError) as ex:
+                self.skipTest(f"symbolic links are unavailable: {ex}")
+
+            legacy_path = archive_link / "ACC.wl"
+            DicomWorklistBuilder().generate(
+                self._values("archive/ACC"),
+                file_name=os.fspath(inside_dir / "ACC.wl"),
+            )
+            original_resolve = Path.resolve
+            legacy_resolutions = 0
+
+            def swap_parent_before_second_resolution(path, *args, **kwargs):
+                nonlocal legacy_resolutions
+                if path == legacy_path:
+                    legacy_resolutions += 1
+                    if legacy_resolutions == 2:
+                        archive_link.unlink()
+                        archive_link.symlink_to(outside_dir, target_is_directory=True)
+                return original_resolve(path, *args, **kwargs)
+
+            builder = DicomWorklistBuilder(folder=os.fspath(worklist_dir))
+            with mock.patch.object(Path, "resolve", swap_parent_before_second_resolution):
+                with self.assertRaisesRegex(ValueError, "must remain inside"):
+                    builder.generate(self._values("archive/ACC"))
+
+            self.assertFalse((outside_dir / "ACC.wl").exists())
+
     def test_hard_linked_destination_updates_all_links(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             output_path = os.path.join(temporary_dir, "safe-accession.wl")

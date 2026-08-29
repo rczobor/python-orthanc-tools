@@ -188,13 +188,14 @@ class DicomWorklistBuilder:
             file_name = os.fspath(output_path)
 
         output_path = Path(file_name)
-        if output_path.is_symlink():
-            output_path = output_path.resolve()
         if automatic_worklist_folder is not None:
+            output_path = output_path.resolve()
             try:
                 output_path.relative_to(automatic_worklist_folder)
             except ValueError:
                 raise ValueError("Worklist path must remain inside the configured folder")
+        elif output_path.is_symlink():
+            output_path = output_path.resolve()
         try:
             output_stat = output_path.stat()
         except FileNotFoundError:
