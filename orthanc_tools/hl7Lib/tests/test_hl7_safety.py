@@ -1,3 +1,4 @@
+import errno
 import os
 import stat
 import tempfile
@@ -308,6 +309,25 @@ class TestWorklistFileSafety(unittest.TestCase):
                 b"preserve",
                 os.getxattr(output_path, "user.orthanc-test"),
             )
+
+    @unittest.skipUnless(
+        all(hasattr(os, name) for name in ("listxattr", "getxattr", "setxattr")),
+        "extended attributes are unavailable",
+    )
+    def test_unsupported_extended_attributes_do_not_block_replacement(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            output_path = os.path.join(temporary_dir, "safe-accession.wl")
+            with open(output_path, "wb") as output_file:
+                output_file.write(b"existing")
+            builder = DicomWorklistBuilder(folder=temporary_dir)
+
+            with mock.patch(
+                "orthanc_tools.hl7Lib.hl7_dicom_worklist_builder.os.listxattr",
+                side_effect=OSError(errno.ENOTSUP, "xattrs unsupported"),
+            ):
+                builder.generate(self._values("safe-accession"))
+
+            self.assertEqual("patient", pydicom.dcmread(output_path).PatientID)
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import errno
 import os
 import secrets
 import stat
@@ -169,7 +170,13 @@ class DicomWorklistBuilder:
                     hasattr(os, name)
                     for name in ("listxattr", "getxattr", "setxattr")
                 ):
-                    for attribute_name in os.listxattr(output_path):
+                    try:
+                        attribute_names = os.listxattr(output_path)
+                    except OSError as ex:
+                        if ex.errno != errno.ENOTSUP:
+                            raise
+                        attribute_names = []
+                    for attribute_name in attribute_names:
                         os.setxattr(
                             temp_file_name,
                             attribute_name,
