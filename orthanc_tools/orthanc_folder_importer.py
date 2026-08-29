@@ -268,6 +268,7 @@ class OrthancFolderImporter:
                     )
                 except Exception as e:
                     logger.exception(f"Error while processing folder entry: {full_path}")
+                    study_id = None
                     folder_errors.append(e)
 
             if folder_errors:
@@ -351,28 +352,37 @@ class OrthancFolderImporter:
             return 0 if extension.lower() in self._skip_extensions else 1
 
         path_entries = os.listdir(path=folder_path)
+        def pairing_stem(name):
+            stem = os.path.splitext(name.lower())[0]
+            for role in ("images", "reports", "image", "report", "dicom", "pdf"):
+                if stem == role:
+                    return ""
+                for separator in ("-", "_", ".", " "):
+                    suffix = f"{separator}{role}"
+                    if stem.endswith(suffix):
+                        return stem[:-len(suffix)]
+            return stem
+
         dicom_stems = set()
         pdf_stems = set()
         direct_priorities = {}
         for name in path_entries:
             path = os.path.join(folder_path, name)
-            if os.path.isfile(path):
-                stem, extension = os.path.splitext(name.lower())
-                priority = sort_priority(path)
-                direct_priorities[name] = priority
-                if extension == ".pdf":
-                    pdf_stems.add(stem)
-                elif priority == 1:
-                    dicom_stems.add(stem)
+            priority = sort_priority(path)
+            direct_priorities[name] = priority
+            stem = pairing_stem(name)
+            if priority == 1:
+                dicom_stems.add(stem)
+            elif priority == 2:
+                pdf_stems.add(stem)
         paired_stems = dicom_stems & pdf_stems
 
         def sort_key(name):
-            stem, extension = os.path.splitext(name.lower())
-            priority = direct_priorities.get(name)
-            if stem in paired_stems and (extension == ".pdf" or priority == 1):
+            stem = pairing_stem(name)
+            priority = direct_priorities[name]
+            if stem in paired_stems and priority in (1, 2):
                 return (0, 0, stem, 0 if priority == 1 else 1, name.lower())
-            path = os.path.join(folder_path, name)
-            return (1, priority if priority is not None else sort_priority(path), "", 0, name.lower())
+            return (1, priority, "", 0, name.lower())
 
         path_entries = sorted(
             path_entries,

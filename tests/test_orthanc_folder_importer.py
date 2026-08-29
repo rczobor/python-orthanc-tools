@@ -540,6 +540,81 @@ class TestOrthancFolderImporter(unittest.TestCase):
             api_client.studies.attach_pdf.call_args_list,
         )
 
+    def test_partial_child_failure_clears_previous_study_context(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "a-old.dcm").write_bytes(b"dicom-a")
+            child_dir = Path(temp_dir, "b-child")
+            unreadable_dir = Path(child_dir, "a-unreadable")
+            unreadable_dir.mkdir(parents=True)
+            Path(child_dir, "image.dcm").write_bytes(b"dicom-b")
+            Path(temp_dir, "c-report.pdf").write_bytes(b"pdf")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+            real_listdir = os.listdir
+
+            def listdir(path):
+                if os.path.abspath(path) == os.path.abspath(unreadable_dir):
+                    raise PermissionError("unreadable")
+                return real_listdir(path)
+
+            with mock.patch(
+                "orthanc_tools.orthanc_folder_importer.os.listdir",
+                side_effect=listdir,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "folder entries"):
+                    importer.upload_and_label(temp_dir)
+
+        api_client.studies.attach_pdf.assert_not_called()
+
+    def test_sibling_image_report_directories_keep_their_study(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for directory in ("a-images", "a-reports", "b-images", "b-reports"):
+                Path(temp_dir, directory).mkdir()
+            Path(temp_dir, "a-images", "image.dcm").write_bytes(b"dicom-a")
+            Path(temp_dir, "a-reports", "report.pdf").write_bytes(b"pdf-a")
+            Path(temp_dir, "b-images", "image.dcm").write_bytes(b"dicom-b")
+            Path(temp_dir, "b-reports", "report.pdf").write_bytes(b"pdf-b")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            [
+                mock.call(
+                    study_id="study-a",
+                    pdf_path=mock.ANY,
+                    series_description="PDF report",
+                ),
+                mock.call(
+                    study_id="study-b",
+                    pdf_path=mock.ANY,
+                    series_description="PDF report",
+                ),
+            ],
+            api_client.studies.attach_pdf.call_args_list,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
