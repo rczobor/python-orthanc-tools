@@ -14,7 +14,7 @@ Pending changes
 
 v 0.22.0
 ========
-- improved the `OrthancFolderImporter` to dicomize the pdf files.
+- improved the `OrthancFolderImporter` to attach one PDF report to a validated single-study import unit.
 
 v 0.21.2
 ========

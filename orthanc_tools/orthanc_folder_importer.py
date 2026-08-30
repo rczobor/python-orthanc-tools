@@ -206,7 +206,9 @@ class OrthancFolderImporter:
                             raise _UnsafePdfImport(f"File not uploaded: {path_to_upload}")
                         return study_orthanc_id
 
-                    study_id = self._api_client.instances.get_parent_study_id(instance_orthanc_ids[0])
+                    study_id = study_orthanc_id
+                    if self._dicomize_pdf or self._labels_list is not None:
+                        study_id = self._api_client.instances.get_parent_study_id(instance_orthanc_ids[0])
                     if (
                         self._dicomize_pdf
                         and study_orthanc_id is not None
@@ -348,8 +350,14 @@ class OrthancFolderImporter:
         return path_entries
 
     def _list_pdf_import_files(self, folder_path):
+        def raise_walk_error(error):
+            raise error
+
         paths = []
-        for current_path, directory_names, file_names in os.walk(folder_path):
+        for current_path, directory_names, file_names in os.walk(
+            folder_path,
+            onerror=raise_walk_error,
+        ):
             directory_names.sort(key=str.lower)
             for file_name in sorted(file_names, key=str.lower):
                 full_path = os.path.join(current_path, file_name)
@@ -359,15 +367,24 @@ class OrthancFolderImporter:
                     )
                 paths.append(full_path)
 
+        pdf_paths = [
+            path for path in paths
+            if path.lower().endswith(".pdf") and ".pdf" not in self._skip_extensions
+        ]
+        if len(pdf_paths) > 1:
+            raise _UnsafePdfImport(
+                f"PDF import unit must contain at most one PDF report; found {len(pdf_paths)}"
+            )
+
         return sorted(
             paths,
             key=lambda path: (path.lower().endswith(".pdf"), path.lower())
         )
 
-    def _has_direct_dicom_or_pdf_files(self, folder_path):
+    def _has_direct_non_archive_files(self, folder_path):
         return any(
             os.path.isfile(os.path.join(folder_path, path))
-            and path.lower().endswith((".dcm", ".pdf"))
+            and not path.lower().endswith("zip")
             for path in os.listdir(folder_path)
         )
 
@@ -393,9 +410,9 @@ class OrthancFolderImporter:
 
         # let's browse the main folder to feed the message queue
 
-        # Direct DICOM/PDF files make the root one unit. Otherwise each child is
+        # Direct non-archive files make the root one unit. Otherwise each child is
         # an independent unit that can be processed and resumed separately.
-        if self._dicomize_pdf and self._has_direct_dicom_or_pdf_files(self._folder_path):
+        if self._dicomize_pdf and self._has_direct_non_archive_files(self._folder_path):
             self._messages.put(self._folder_path)
         else:
             for path in sorted(os.listdir(path=self._folder_path), key=str.lower):

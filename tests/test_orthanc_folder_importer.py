@@ -33,6 +33,24 @@ class TestOrthancFolderImporter(unittest.TestCase):
         api_client.is_alive.assert_called_once_with()
         api_client.instances.get_parent_study_id.assert_not_called()
 
+    def test_regular_import_does_not_lookup_parent_without_labels(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-1"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir, "image.dcm")
+            input_path.write_bytes(b"dicom")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+            )
+
+            importer.upload_and_label(str(input_path))
+
+        api_client.instances.get_parent_study_id.assert_not_called()
+
     def test_zip_pdf_uses_the_study_uploaded_from_the_same_archive(self):
         api_client = mock.Mock()
         api_client.upload.return_value = ["instance-1"]
@@ -109,6 +127,50 @@ class TestOrthancFolderImporter(unittest.TestCase):
                 importer.upload_and_label(temp_dir)
 
         api_client.studies.attach_pdf.assert_not_called()
+
+    def test_pdf_import_rejects_multiple_pdfs_before_uploading(self):
+        api_client = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "image.dcm").write_bytes(b"dicom")
+            Path(temp_dir, "report-a.pdf").write_bytes(b"pdf-a")
+            Path(temp_dir, "report-b.pdf").write_bytes(b"pdf-b")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "one PDF"):
+                importer.upload_and_label(temp_dir)
+
+        api_client.upload.assert_not_called()
+        api_client.studies.attach_pdf.assert_not_called()
+
+    def test_pdf_import_propagates_subtree_traversal_errors(self):
+        api_client = mock.Mock()
+
+        def failed_walk(_path, onerror):
+            onerror(PermissionError("denied"))
+            return []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                dicomize_pdf=True,
+            )
+
+            with mock.patch("orthanc_tools.orthanc_folder_importer.os.walk", failed_walk):
+                with self.assertRaisesRegex(PermissionError, "denied"):
+                    importer.upload_and_label(temp_dir)
+
+        api_client.upload.assert_not_called()
 
     def test_pdf_import_validates_root_study_before_attaching_nested_pdf(self):
         api_client = mock.Mock()
@@ -295,6 +357,39 @@ class TestOrthancFolderImporter(unittest.TestCase):
             importer.execute()
 
             self.assertEqual([str(archive_path)], state_path.read_text().splitlines())
+
+        api_client.studies.attach_pdf.assert_called_once_with(
+            study_id="study-1",
+            pdf_path=mock.ANY,
+            series_description="PDF report",
+        )
+
+    def test_pdf_mode_groups_extensionless_root_dicom_with_nested_pdf(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-1"]
+        api_client.instances.get_parent_study_id.return_value = "study-1"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir, "input")
+            input_path.mkdir()
+            Path(input_path, "image.ima").write_bytes(b"dicom")
+            report_path = Path(input_path, "reports")
+            report_path.mkdir()
+            Path(report_path, "report.pdf").write_bytes(b"pdf")
+            state_path = Path(temp_dir, "state.txt")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=str(input_path),
+                errors_path=None,
+                state_path=str(state_path),
+                max_retries=0,
+                worker_threads_count=1,
+                dicomize_pdf=True,
+            )
+
+            importer.execute()
+
+            self.assertEqual([str(input_path)], state_path.read_text().splitlines())
 
         api_client.studies.attach_pdf.assert_called_once_with(
             study_id="study-1",
