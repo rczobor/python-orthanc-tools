@@ -116,6 +116,7 @@ test data and volumes, and use fixed localhost ports:
 - `tests.test_3_orthancs`
 - `tests.test_orthanc_replicator`
 - `tests.test_label_modifier`
+- `tox`, which collects the Docker-backed suites in every environment
 
 `tests.test_3_orthancs` skips Compose when `ORTHANC_TEST_EXTERNAL=1` and uses
 `ORTHANC_TEST_HOST`, but its tests still call `delete_all_content()`. Unset both
@@ -127,8 +128,10 @@ with another checkout. Afterward, inspect `docker compose` state and `git diff`.
 `tests.test_label_modifier` rewrites
 `tests/docker-setup-auth/permissions.json` during its run.
 
-Use `tox` only when the task concerns the full compatibility matrix. Do not run
-every Docker suite merely to verify a small pure-Python change.
+`tox.ini` currently refers to `orthanc_tools/hl7lib/tests` instead of the
+case-sensitive `orthanc_tools/hl7Lib/tests` path. Do not use tox as a
+verification gate until that configuration is fixed. Do not run every Docker
+suite merely to verify a small pure-Python change.
 
 ## Releases and pull requests
 
