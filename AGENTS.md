@@ -104,14 +104,15 @@ uses `unittest`, even when pytest is used as its runner.
 Useful focused commands:
 
 ```bash
-python -m unittest discover -s orthanc_tools/hl7Lib/tests
+python -m unittest orthanc_tools.hl7Lib.tests.test_hl7_message_parser
 python -m unittest tests.test_old_files_deleter
 python -m unittest tests.test_3_orthancs.Test3Orthancs.<test_method>
 ```
 
-The following suites start Docker Compose services, delete their test data and
-volumes, and use fixed localhost ports:
+The following command and suites start Docker Compose services, delete their
+test data and volumes, and use fixed localhost ports:
 
+- `python -m unittest discover -s orthanc_tools/hl7Lib/tests`
 - `tests.test_3_orthancs`
 - `tests.test_orthanc_replicator`
 - `tests.test_label_modifier`
