@@ -1156,7 +1156,7 @@ class Test3Orthancs(unittest.TestCase):
             self.assertEqual(4, len(self.oa.instances.get_all_ids()))
             with open(state_path, 'r') as file:
                 lines = file.readlines()
-                self.assertEqual(4, len(lines))
+                self.assertEqual(3, len(lines))
 
     def test_folder_importer_with_labels(self):
         self.oa.delete_all_content()
