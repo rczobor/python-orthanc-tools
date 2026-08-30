@@ -422,6 +422,8 @@ class OrthancFolderImporter:
                 full_path = os.path.join(current_path, file_name)
                 if self._is_importer_file(full_path):
                     continue
+                if self._is_skipped_file(full_path):
+                    continue
                 if os.path.islink(full_path):
                     raise _UnsafePdfImport(
                         f"PDF import units cannot contain a symbolic link: {full_path}"

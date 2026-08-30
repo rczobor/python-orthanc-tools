@@ -106,6 +106,32 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
         api_client.studies.attach_pdf.assert_not_called()
 
+    def test_pdf_import_ignores_a_nested_zip_when_configured_to_skip_it(self):
+        api_client = mock.Mock()
+        api_client.studies.get_pdf_instances.return_value = []
+        api_client.upload.return_value = ["instance-1"]
+        api_client.instances.get_parent_study_id.return_value = "study-1"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "image.dcm").write_bytes(b"dicom")
+            Path(temp_dir, "report.pdf").write_bytes(b"pdf")
+            with zipfile.ZipFile(Path(temp_dir, "backup.zip"), "w") as archive:
+                archive.writestr("backup.dcm", b"backup")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                skip_extensions=[".zip"],
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        api_client.upload.assert_called_once_with(b"dicom", ignore_errors=True)
+        api_client.studies.attach_pdf.assert_called_once()
+
     def test_pdf_import_rejects_multiple_studies_in_one_folder(self):
         api_client = mock.Mock()
         api_client.upload.side_effect = [["instance-1"], ["instance-2"]]
