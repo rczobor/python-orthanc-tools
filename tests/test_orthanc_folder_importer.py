@@ -260,7 +260,7 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
             self.assertFalse(state_path.exists())
 
-        api_client.upload.assert_called_once_with(b"dicom", ignore_errors=True)
+        api_client.upload.assert_not_called()
         api_client.studies.attach_pdf.assert_not_called()
 
     def test_pdf_import_validates_root_study_before_attaching_nested_pdf(self):
@@ -699,6 +699,47 @@ class TestOrthancFolderImporter(unittest.TestCase):
                 study_id = upload_and_label(path_to_upload, study_orthanc_id)
                 if Path(path_to_upload) == archive_path:
                     os.replace(replacement_path, archive_path)
+                return study_id
+
+            with mock.patch.object(
+                importer,
+                "upload_and_label",
+                side_effect=upload_then_replace,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Importer worker failed"):
+                    importer.execute()
+
+            self.assertFalse(state_path.exists())
+
+    def test_pdf_mode_does_not_checkpoint_a_changed_folder_unit(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-1"]
+        api_client.instances.get_parent_study_id.return_value = "study-1"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir, "input")
+            unit_path = Path(input_path, "study")
+            unit_path.mkdir(parents=True)
+            image_path = Path(unit_path, "image.dcm")
+            image_path.write_bytes(b"dicom")
+            state_path = Path(temp_dir, "state.txt")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=str(input_path),
+                errors_path=None,
+                state_path=str(state_path),
+                max_retries=0,
+                worker_threads_count=1,
+                dicomize_pdf=True,
+            )
+            upload_and_label = importer.upload_and_label
+
+            def upload_then_replace(path_to_upload, study_orthanc_id=None):
+                study_id = upload_and_label(path_to_upload, study_orthanc_id)
+                if Path(path_to_upload) == unit_path:
+                    replacement_path = Path(temp_dir, "replacement.dcm")
+                    replacement_path.write_bytes(b"replacement")
+                    os.replace(replacement_path, image_path)
                 return study_id
 
             with mock.patch.object(

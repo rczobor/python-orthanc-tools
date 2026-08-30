@@ -414,14 +414,27 @@ class OrthancFolderImporter:
                 break
 
             try:
-                is_zip_unit = self._dicomize_pdf and self._is_zip_archive(path)
-                zip_version = self._file_version(path) if is_zip_unit else None
                 if self._dicomize_pdf and str(path) in self._folders_uploaded:
                     logger.info(f"Folder {path} already processed, skipping...")
                 else:
+                    is_folder_unit = self._dicomize_pdf and os.path.isdir(path)
+                    folder_snapshot = (
+                        self._snapshot_pdf_import_folder(path)
+                        if is_folder_unit
+                        else None
+                    )
+                    is_zip_unit = self._dicomize_pdf and self._is_zip_archive(path)
+                    zip_version = self._file_version(path) if is_zip_unit else None
                     self.upload_and_label(path_to_upload=path)
                     if self._dicomize_pdf:
-                        if os.path.isdir(path):
+                        if is_folder_unit:
+                            if (
+                                not os.path.isdir(path)
+                                or self._snapshot_pdf_import_folder(path) != folder_snapshot
+                            ):
+                                raise _UnsafePdfImport(
+                                    f"PDF import folder changed while it was being imported: {path}"
+                                )
                             self.add_folder_path_in_state_file(path)
                         elif is_zip_unit:
                             if (
@@ -520,6 +533,12 @@ class OrthancFolderImporter:
         return sorted(
             paths,
             key=lambda path: (path.lower().endswith(".pdf"), path.lower())
+        )
+
+    def _snapshot_pdf_import_folder(self, folder_path):
+        return tuple(
+            (path, self._file_version(path))
+            for path in self._list_pdf_import_files(folder_path)
         )
 
     def _has_direct_non_archive_files(self, folder_path):
