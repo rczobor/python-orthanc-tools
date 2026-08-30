@@ -430,13 +430,11 @@ class OrthancFolderImporter:
 
         def entry_identity(entry):
             parts = Path(entry.lower()).parts
-            parent_parts = parts[:-1]
-            if parent_parts and parent_parts[0] in role_names:
-                parent_parts = parent_parts[1:]
-            elif parent_parts:
-                normalized_parent = self._strip_role_suffix(parent_parts[0])
-                if normalized_parent != parent_parts[0]:
-                    parent_parts = (normalized_parent,) + parent_parts[1:]
+            parent_parts = tuple(
+                self._strip_role_suffix(part)
+                for part in parts[:-1]
+                if part not in role_names
+            )
             stem = os.path.splitext(parts[-1])[0]
             return parent_parts, stem
 

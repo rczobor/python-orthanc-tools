@@ -1397,6 +1397,34 @@ class TestOrthancFolderImporter(unittest.TestCase):
             [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
         )
 
+    def test_paired_archive_nested_role_roots_preserve_failed_instance_study(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], []]
+        api_client.instances.get_parent_study_id.return_value = "study-a"
+        api_client.is_alive.return_value = True
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with zipfile.ZipFile(Path(temp_dir, "batch-images.zip"), "w") as archive:
+                archive.writestr("images/a-1.dcm", b"dicom-a")
+                archive.writestr("images/a-2.dcm", b"invalid-a")
+            with zipfile.ZipFile(Path(temp_dir, "batch-reports.zip"), "w") as archive:
+                archive.writestr("reports/a.pdf", b"pdf-a")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            ["study-a"],
+            [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
+        )
+
     def test_active_group_includes_centralized_parent(self):
         api_client = mock.Mock()
         api_client.upload.side_effect = [["instance-a"], []]
