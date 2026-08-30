@@ -484,10 +484,17 @@ class OrthancFolderImporter:
                 if normalized_parent != parent_parts[0]:
                     parent_parts = (normalized_parent,) + parent_parts[1:]
             group = (parent_parts, self._strip_role_suffix(stem))
-            member_signature = tuple(sorted({
-                self._strip_role_suffix(
-                    os.path.splitext(os.path.basename(member))[0]
+
+            def member_group(member):
+                member_parts = Path(member).parts
+                if len(member_parts) > 1:
+                    return os.path.join(*member_parts[:-1]).lower()
+                return self._strip_role_suffix(
+                    os.path.splitext(member_parts[-1])[0]
                 )
+
+            member_signature = tuple(sorted({
+                member_group(member)
                 for member in member_names
                 if member.endswith(".pdf")
                 or os.path.splitext(member)[1] not in self._skip_extensions

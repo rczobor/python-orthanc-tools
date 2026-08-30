@@ -1438,6 +1438,40 @@ class TestOrthancFolderImporter(unittest.TestCase):
             [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
         )
 
+    def test_archive_signatures_preserve_member_parent_paths(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_members = (
+                ("batch-dicom.zip", "a/image.dcm", b"dicom-a"),
+                ("batch-images.zip", "b/image.dcm", b"dicom-b"),
+                ("batch-pdf.zip", "b/report.pdf", b"pdf-b"),
+                ("batch-reports.zip", "a/report.pdf", b"pdf-a"),
+            )
+            for archive_name, member_name, content in archive_members:
+                with zipfile.ZipFile(Path(temp_dir, archive_name), "w") as archive:
+                    archive.writestr(member_name, content)
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            {"a": "study-a", "b": "study-b"},
+            {
+                Path(call.kwargs["pdf_path"]).parent.name: call.kwargs["study_id"]
+                for call in api_client.studies.attach_pdf.call_args_list
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
