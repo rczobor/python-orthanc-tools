@@ -310,6 +310,39 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
             self.assertFalse(state_path.exists())
 
+    def test_pdf_mode_reprocesses_an_unterminated_state_record(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-1"]
+        api_client.instances.get_parent_study_id.return_value = "study-1"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir, "input")
+            completed_path = Path(input_path, "completed")
+            completed_path.mkdir(parents=True)
+            unit_path = Path(input_path, "study")
+            unit_path.mkdir()
+            Path(unit_path, "image.dcm").write_bytes(b"dicom")
+            state_path = Path(temp_dir, "state.txt")
+            state_path.write_text(f"{completed_path}\n{unit_path}")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=str(input_path),
+                errors_path=None,
+                state_path=str(state_path),
+                max_retries=0,
+                worker_threads_count=1,
+                dicomize_pdf=True,
+            )
+
+            importer.execute()
+
+            self.assertEqual(
+                [str(completed_path), str(unit_path)],
+                state_path.read_text().splitlines(),
+            )
+
+        api_client.upload.assert_called_once_with(b"dicom", ignore_errors=True)
+
     def test_pdf_attachment_is_retried_before_checkpointing(self):
         api_client = mock.Mock()
         api_client.studies.get_pdf_instances.return_value = []
@@ -630,6 +663,37 @@ class TestOrthancFolderImporter(unittest.TestCase):
             pdf_path=mock.ANY,
             series_description="PDF report",
         )
+
+    def test_pdf_mode_groups_non_archive_zip_named_dicom_with_nested_pdf(self):
+        api_client = mock.Mock()
+        api_client.studies.get_pdf_instances.return_value = []
+        api_client.upload.return_value = ["instance-1"]
+        api_client.instances.get_parent_study_id.return_value = "study-1"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir, "input")
+            input_path.mkdir()
+            Path(input_path, "image.zip").write_bytes(b"dicom")
+            report_path = Path(input_path, "reports")
+            report_path.mkdir()
+            Path(report_path, "report.pdf").write_bytes(b"pdf")
+            state_path = Path(temp_dir, "state.txt")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=str(input_path),
+                errors_path=None,
+                state_path=str(state_path),
+                max_retries=0,
+                worker_threads_count=1,
+                dicomize_pdf=True,
+            )
+
+            importer.execute()
+
+            self.assertEqual([str(input_path)], state_path.read_text().splitlines())
+
+        api_client.upload.assert_called_once_with(b"dicom", ignore_errors=True)
+        api_client.studies.attach_pdf.assert_called_once()
 
     def test_cli_help_builds_parser(self):
         result = subprocess.run(

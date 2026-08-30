@@ -121,8 +121,47 @@ class OrthancFolderImporter:
     def add_folder_path_in_state_file(self, folder_path):
         if self._state_path:
             with self._lock:
-                with open(self._state_path, "at") as f:
-                    f.write(str(folder_path) + "\n")
+                self._truncate_incomplete_state_record()
+                original_size = (
+                    os.path.getsize(self._state_path)
+                    if os.path.exists(self._state_path)
+                    else 0
+                )
+                try:
+                    with open(self._state_path, "at") as f:
+                        f.write(str(folder_path) + "\n")
+                        f.flush()
+                        os.fsync(f.fileno())
+                except Exception:
+                    if os.path.exists(self._state_path):
+                        with open(self._state_path, "r+b") as state_file:
+                            state_file.truncate(original_size)
+                            state_file.flush()
+                            os.fsync(state_file.fileno())
+                    raise
+
+    def _truncate_incomplete_state_record(self):
+        if not self._state_path or not os.path.isfile(self._state_path):
+            return
+
+        with open(self._state_path, "r+b") as state_file:
+            state_file.seek(0, os.SEEK_END)
+            if state_file.tell() == 0:
+                return
+            state_file.seek(-1, os.SEEK_END)
+            if state_file.read(1) == b"\n":
+                return
+
+            logger.warning("Discarding incomplete final importer state record")
+            state_file.seek(0)
+            state = state_file.read()
+            last_newline = state.rfind(b"\n")
+            complete_state = state[:last_newline + 1] if last_newline >= 0 else b""
+            state_file.seek(0)
+            state_file.write(complete_state)
+            state_file.truncate()
+            state_file.flush()
+            os.fsync(state_file.fileno())
 
     def _attach_pdf_idempotently(self, study_id, pdf_path):
         with open(pdf_path, "rb") as pdf_file:
@@ -170,7 +209,7 @@ class OrthancFolderImporter:
                 return study_orthanc_id
 
             # zip file case
-            if path_to_upload.lower().endswith("zip") and zipfile.is_zipfile(path_to_upload):
+            if self._is_zip_archive(path_to_upload):
                 with tempfile.TemporaryDirectory() as tempDir:
                     with zipfile.ZipFile(path_to_upload, 'r') as z:
                         z.extractall(tempDir)
@@ -358,7 +397,7 @@ class OrthancFolderImporter:
                     self.upload_and_label(path_to_upload=path)
                     if (
                         self._dicomize_pdf
-                        and (os.path.isdir(path) or zipfile.is_zipfile(path))
+                        and (os.path.isdir(path) or self._is_zip_archive(path))
                     ):
                         self.add_folder_path_in_state_file(path)
             except Exception as error:
@@ -395,6 +434,9 @@ class OrthancFolderImporter:
     def _is_skipped_file(self, path):
         return os.path.splitext(path)[1].lower() in self._skip_extensions
 
+    def _is_zip_archive(self, path):
+        return os.fspath(path).lower().endswith("zip") and zipfile.is_zipfile(path)
+
     def _list_input_entries(self, folder_path):
         return [
             path
@@ -428,7 +470,7 @@ class OrthancFolderImporter:
                     raise _UnsafePdfImport(
                         f"PDF import units cannot contain a symbolic link: {full_path}"
                     )
-                if full_path.lower().endswith(".zip") and zipfile.is_zipfile(full_path):
+                if self._is_zip_archive(full_path):
                     raise _UnsafePdfImport(
                         f"Nested ZIP archives are not supported in a PDF import folder: {full_path}"
                     )
@@ -451,8 +493,8 @@ class OrthancFolderImporter:
     def _has_direct_non_archive_files(self, folder_path):
         return any(
             os.path.isfile(os.path.join(folder_path, path))
-            and not path.lower().endswith("zip")
             and not self._is_skipped_file(path)
+            and not self._is_zip_archive(os.path.join(folder_path, path))
             for path in self._list_input_entries(folder_path)
         )
 
@@ -460,6 +502,7 @@ class OrthancFolderImporter:
     def execute(self):
         # read state
         if self._state_path and os.path.isfile(self._state_path):
+            self._truncate_incomplete_state_record()
             with open(self._state_path, 'r') as file:
                 lines = file.readlines()
                 self._folders_uploaded = [line.strip() for line in lines]
