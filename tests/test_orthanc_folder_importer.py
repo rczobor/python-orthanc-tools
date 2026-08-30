@@ -668,6 +668,49 @@ class TestOrthancFolderImporter(unittest.TestCase):
             series_description="PDF report",
         )
 
+    def test_pdf_mode_does_not_checkpoint_a_replaced_zip_unit(self):
+        api_client = mock.Mock()
+        api_client.studies.get_pdf_instances.return_value = []
+        api_client.upload.return_value = ["instance-1"]
+        api_client.instances.get_parent_study_id.return_value = "study-1"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir, "input")
+            input_path.mkdir()
+            archive_path = Path(input_path, "study.zip")
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("image.dcm", b"dicom")
+            replacement_path = Path(temp_dir, "replacement.zip")
+            with zipfile.ZipFile(replacement_path, "w") as archive:
+                archive.writestr("replacement.dcm", b"replacement")
+            state_path = Path(temp_dir, "state.txt")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=str(input_path),
+                errors_path=None,
+                state_path=str(state_path),
+                max_retries=0,
+                worker_threads_count=1,
+                dicomize_pdf=True,
+            )
+            upload_and_label = importer.upload_and_label
+
+            def upload_then_replace(path_to_upload, study_orthanc_id=None):
+                study_id = upload_and_label(path_to_upload, study_orthanc_id)
+                if Path(path_to_upload) == archive_path:
+                    os.replace(replacement_path, archive_path)
+                return study_id
+
+            with mock.patch.object(
+                importer,
+                "upload_and_label",
+                side_effect=upload_then_replace,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Importer worker failed"):
+                    importer.execute()
+
+            self.assertFalse(state_path.exists())
+
     def test_pdf_mode_groups_extensionless_root_dicom_with_nested_pdf(self):
         api_client = mock.Mock()
         api_client.studies.get_pdf_instances.return_value = []

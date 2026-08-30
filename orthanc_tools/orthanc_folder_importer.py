@@ -164,22 +164,22 @@ class OrthancFolderImporter:
             state_file.flush()
             os.fsync(state_file.fileno())
 
-    def _attach_pdf_idempotently(self, study_id, pdf_path):
-        def file_version(path):
-            stat = os.stat(path, follow_symlinks=False)
-            return (
-                stat.st_dev,
-                stat.st_ino,
-                stat.st_size,
-                stat.st_mtime_ns,
-                stat.st_ctime_ns,
-            )
+    def _file_version(self, path):
+        stat = os.stat(path, follow_symlinks=False)
+        return (
+            stat.st_dev,
+            stat.st_ino,
+            stat.st_size,
+            stat.st_mtime_ns,
+            stat.st_ctime_ns,
+        )
 
-        source_version = file_version(pdf_path)
+    def _attach_pdf_idempotently(self, study_id, pdf_path):
+        source_version = self._file_version(pdf_path)
         with tempfile.TemporaryDirectory() as temp_dir:
             pdf_snapshot_path = os.path.join(temp_dir, "report.pdf")
             shutil.copyfile(pdf_path, pdf_snapshot_path)
-            if file_version(pdf_path) != source_version:
+            if self._file_version(pdf_path) != source_version:
                 raise _UnsafePdfImport(f"PDF changed while it was being imported: {pdf_path}")
 
             with open(pdf_snapshot_path, "rb") as pdf_file:
@@ -208,7 +208,7 @@ class OrthancFolderImporter:
                         series_description="PDF report",
                     )
 
-            if file_version(pdf_path) != source_version:
+            if self._file_version(pdf_path) != source_version:
                 raise _UnsafePdfImport(f"PDF changed while it was being imported: {pdf_path}")
 
     def upload_and_label(self, path_to_upload, study_orthanc_id=None):
@@ -414,15 +414,24 @@ class OrthancFolderImporter:
                 break
 
             try:
+                is_zip_unit = self._dicomize_pdf and self._is_zip_archive(path)
+                zip_version = self._file_version(path) if is_zip_unit else None
                 if self._dicomize_pdf and str(path) in self._folders_uploaded:
                     logger.info(f"Folder {path} already processed, skipping...")
                 else:
                     self.upload_and_label(path_to_upload=path)
-                    if (
-                        self._dicomize_pdf
-                        and (os.path.isdir(path) or self._is_zip_archive(path))
-                    ):
-                        self.add_folder_path_in_state_file(path)
+                    if self._dicomize_pdf:
+                        if os.path.isdir(path):
+                            self.add_folder_path_in_state_file(path)
+                        elif is_zip_unit:
+                            if (
+                                not self._is_zip_archive(path)
+                                or self._file_version(path) != zip_version
+                            ):
+                                raise _UnsafePdfImport(
+                                    f"ZIP import unit changed while it was being imported: {path}"
+                                )
+                            self.add_folder_path_in_state_file(path)
             except Exception as error:
                 logger.error(f"Importer worker failed while processing {path}: {error}", exc_info=True)
                 with self._lock:
