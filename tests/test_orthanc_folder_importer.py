@@ -53,6 +53,7 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
     def test_zip_pdf_uses_the_study_uploaded_from_the_same_archive(self):
         api_client = mock.Mock()
+        api_client.studies.get_pdf_instances.return_value = []
         api_client.upload.return_value = ["instance-1"]
         api_client.instances.get_parent_study_id.return_value = "study-1"
 
@@ -222,6 +223,7 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
     def test_pdf_attachment_is_retried_before_checkpointing(self):
         api_client = mock.Mock()
+        api_client.studies.get_pdf_instances.return_value = []
         api_client.upload.return_value = ["instance-1"]
         api_client.instances.get_parent_study_id.return_value = "study-1"
         api_client.studies.attach_pdf.side_effect = [RuntimeError("temporary"), None]
@@ -247,8 +249,40 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
         self.assertEqual(2, api_client.studies.attach_pdf.call_count)
 
+    def test_existing_matching_pdf_is_not_attached_again(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-1"]
+        api_client.instances.get_parent_study_id.return_value = "study-1"
+        api_client.studies.get_pdf_instances.return_value = ["pdf-instance"]
+
+        def download_pdf(_instance_id, destination_path):
+            Path(destination_path).write_bytes(b"pdf")
+
+        api_client.instances.download_pdf.side_effect = download_pdf
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "image.dcm").write_bytes(b"dicom")
+            Path(temp_dir, "report.pdf").write_bytes(b"pdf")
+            state_path = Path(temp_dir, "state.txt")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=str(state_path),
+                max_retries=0,
+                worker_threads_count=1,
+                dicomize_pdf=True,
+            )
+
+            importer.execute()
+
+            self.assertEqual([temp_dir], state_path.read_text().splitlines())
+
+        api_client.studies.attach_pdf.assert_not_called()
+
     def test_failed_pdf_does_not_checkpoint_a_nested_dicom_folder(self):
         api_client = mock.Mock()
+        api_client.studies.get_pdf_instances.return_value = []
         api_client.upload.return_value = ["instance-1"]
         api_client.instances.get_parent_study_id.return_value = "study-1"
         api_client.studies.attach_pdf.side_effect = RuntimeError("failed")
@@ -296,6 +330,7 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
     def test_pdf_mode_treats_sibling_folders_as_independent_units(self):
         api_client = mock.Mock()
+        api_client.studies.get_pdf_instances.return_value = []
         api_client.upload.side_effect = [["instance-1"], ["instance-2"]]
         api_client.instances.get_parent_study_id.side_effect = ["study-1", "study-2"]
 
@@ -333,6 +368,7 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
     def test_pdf_mode_imports_and_checkpoints_a_root_zip_unit(self):
         api_client = mock.Mock()
+        api_client.studies.get_pdf_instances.return_value = []
         api_client.upload.return_value = ["instance-1"]
         api_client.instances.get_parent_study_id.return_value = "study-1"
 
@@ -366,6 +402,7 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
     def test_pdf_mode_groups_extensionless_root_dicom_with_nested_pdf(self):
         api_client = mock.Mock()
+        api_client.studies.get_pdf_instances.return_value = []
         api_client.upload.return_value = ["instance-1"]
         api_client.instances.get_parent_study_id.return_value = "study-1"
 

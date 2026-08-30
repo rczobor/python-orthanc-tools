@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import logging
 from orthanc_api_client import OrthancApiClient, exceptions
 from typing import List
@@ -123,6 +124,31 @@ class OrthancFolderImporter:
                 with open(self._state_path, "at") as f:
                     f.write(str(folder_path) + "\n")
 
+    def _attach_pdf_idempotently(self, study_id, pdf_path):
+        with open(pdf_path, "rb") as pdf_file:
+            pdf_digest = hashlib.file_digest(pdf_file, "sha256").digest()
+
+        with self._lock:
+            existing_pdf_ids = self._api_client.studies.get_pdf_instances(
+                study_id,
+                max_instance_count_in_series_to_analyze=sys.maxsize,
+            )
+            with tempfile.TemporaryDirectory() as temp_dir:
+                for instance_id in existing_pdf_ids:
+                    existing_pdf_path = os.path.join(temp_dir, f"{instance_id}.pdf")
+                    self._api_client.instances.download_pdf(instance_id, existing_pdf_path)
+                    with open(existing_pdf_path, "rb") as existing_pdf_file:
+                        existing_digest = hashlib.file_digest(existing_pdf_file, "sha256").digest()
+                    if existing_digest == pdf_digest:
+                        logger.info(f"PDF report already attached to study {study_id}, skipping")
+                        return
+
+            self._api_client.studies.attach_pdf(
+                study_id=study_id,
+                pdf_path=pdf_path,
+                series_description="PDF report",
+            )
+
     def upload_and_label(self, path_to_upload, study_orthanc_id=None):
         """
         Upload the file if path_to_upload is a file path
@@ -169,10 +195,9 @@ class OrthancFolderImporter:
                     time.sleep(delay)
                 try:
                     if is_pdf:
-                        self._api_client.studies.attach_pdf(
+                        self._attach_pdf_idempotently(
                             study_id=study_orthanc_id,
                             pdf_path=path_to_upload,
-                            series_description="PDF report",
                         )
                         return study_orthanc_id
 
