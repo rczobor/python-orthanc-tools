@@ -8,6 +8,7 @@ Pending changes
 - `OrthancForwarder`: `StableStudy` now waits until Orthanc reports the study as stable before forwarding or deleting source data.
 - `OrthancFolderImporter`: added `--skip_extensions` / `SKIP_EXTENSIONS` to ignore files by extension.
 - `OrthancFolderImporter`: worker threads now pause and resume automatically when Orthanc is unreachable.
+- `OrthancFolderImporter`: added retry-idempotent attachment of one PDF report to a validated single-study import unit.
 - `OrthancMonitor`: fixed logger formatting error in exception handler.
 - `Scheduler`: fixed optional schedule parsing, inclusive weekday ranges, the default timezone, and Python 3.8 compatibility.
 - Simplified Dockerfile with `.dockerignore` for smaller build context.
