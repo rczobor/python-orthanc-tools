@@ -282,13 +282,63 @@ class OrthancFolderImporter:
                             continue
                         processed_archive_groups.add(archive_group)
                         with tempfile.TemporaryDirectory() as temp_dir:
+                            image_signatures = [
+                                set(signature)
+                                for _, priority, signature in archive_group
+                                if priority == 1
+                            ]
+                            report_signatures = [
+                                set(signature)
+                                for _, priority, signature in archive_group
+                                if priority == 2
+                            ]
+
+                            def signatures_are_disjoint(signatures):
+                                seen = set()
+                                for signature in signatures:
+                                    if seen & signature:
+                                        return False
+                                    seen.update(signature)
+                                return True
+
+                            def archive_paths_are_unique():
+                                seen_by_role = {1: set(), 2: set()}
+                                for archive_name, priority, _ in archive_group:
+                                    archive_path = os.path.join(path_to_upload, archive_name)
+                                    with zipfile.ZipFile(archive_path, "r") as archive:
+                                        member_paths = {
+                                            member.filename.lower()
+                                            for member in archive.infolist()
+                                            if not member.is_dir()
+                                        }
+                                    if seen_by_role[priority] & member_paths:
+                                        return False
+                                    seen_by_role[priority].update(member_paths)
+                                return True
+
+                            image_members = set().union(*image_signatures)
+                            report_members = set().union(*report_signatures)
+                            exact_signature_match = bool(
+                                {tuple(sorted(signature)) for signature in image_signatures}
+                                & {tuple(sorted(signature)) for signature in report_signatures}
+                            )
+                            align_by_members = (
+                                bool(image_members)
+                                and image_members == report_members
+                                and not exact_signature_match
+                                and signatures_are_disjoint(image_signatures)
+                                and signatures_are_disjoint(report_signatures)
+                                and archive_paths_are_unique()
+                            )
                             role_indexes = {1: 0, 2: 0}
-                            for archive_name, priority in archive_group:
-                                role_dir = os.path.join(
+                            for archive_name, priority, _ in archive_group:
+                                role_dir_parts = [
                                     temp_dir,
                                     "images" if priority == 1 else "reports",
-                                    str(role_indexes[priority]),
-                                )
+                                ]
+                                if not align_by_members:
+                                    role_dir_parts.append(str(role_indexes[priority]))
+                                role_dir = os.path.join(*role_dir_parts)
                                 role_indexes[priority] += 1
                                 os.makedirs(role_dir, exist_ok=True)
                                 archive_path = os.path.join(path_to_upload, archive_name)
@@ -522,7 +572,7 @@ class OrthancFolderImporter:
             if {priority for _, priority, _ in entries} != {1, 2}:
                 return
             archive_group = tuple(sorted(
-                ((name, priority) for name, priority, _ in entries),
+                entries,
                 key=lambda entry: (entry[1], entry[0]),
             ))
             for name, _, _ in entries:
@@ -671,16 +721,37 @@ class OrthancFolderImporter:
         def strip_role_suffix(stem):
             return "" if stem in image_roles | report_roles else self._strip_role_suffix(stem)
 
-        def centralized_parent(parts):
+        def centralized_prefix(parts):
             directory_group = (
                 image_directory_groups.get(parts[0])
                 if parts[0] in centralized_image_dirs
                 else report_directory_groups.get(parts[0])
             )
-            prefix = (directory_group,) if directory_group else ()
+            return (directory_group,) if directory_group else ()
+
+        def raw_centralized_parent(parts):
+            return centralized_prefix(parts) + tuple(
+                part.lower() for part in parts[1:-1]
+            )
+
+        raw_parents_by_role = {"image": set(), "report": set()}
+        for name in path_entries:
+            parts = Path(name).parts
+            if len(parts) < 2 or parts[0] not in centralized_dirs:
+                continue
+            role = "image" if parts[0] in centralized_image_dirs else "report"
+            raw_parents_by_role[role].add(raw_centralized_parent(parts))
+        shared_raw_parents = (
+            raw_parents_by_role["image"] & raw_parents_by_role["report"]
+        )
+
+        def centralized_parent(parts):
+            raw_parent = raw_centralized_parent(parts)
+            if raw_parent in shared_raw_parents:
+                return raw_parent
+            prefix = centralized_prefix(parts)
             relative_parent = []
-            for part in parts[1:-1]:
-                lower_part = part.lower()
+            for lower_part in raw_parent[len(prefix):]:
                 if lower_part in image_roles | report_roles:
                     continue
                 relative_parent.append(self._strip_role_suffix(lower_part))

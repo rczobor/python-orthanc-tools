@@ -1004,6 +1004,40 @@ class TestOrthancFolderImporter(unittest.TestCase):
             [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
         )
 
+    def test_matching_centralized_study_directories_preserve_role_suffixes(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-images"], ["instance-reports"]]
+        api_client.instances.get_parent_study_id.side_effect = [
+            "study-images", "study-reports",
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for study in ("case-images", "case-reports"):
+                image_dir = Path(temp_dir, "images", study)
+                report_dir = Path(temp_dir, "reports", study)
+                image_dir.mkdir(parents=True)
+                report_dir.mkdir(parents=True)
+                Path(image_dir, "1.dcm").write_bytes(f"dicom-{study}".encode())
+                Path(report_dir, "report.pdf").write_bytes(f"pdf-{study}".encode())
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            {"case-images": "study-images", "case-reports": "study-reports"},
+            {
+                Path(call.kwargs["pdf_path"]).parent.name: call.kwargs["study_id"]
+                for call in api_client.studies.attach_pdf.call_args_list
+            },
+        )
+
     def test_flat_centralized_reports_pair_nested_study_directories(self):
         api_client = mock.Mock()
         api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
@@ -1362,6 +1396,46 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
         self.assertEqual(
             {"a.pdf": "study-a", "b.pdf": "study-b"},
+            {
+                Path(call.kwargs["pdf_path"]).name: call.kwargs["study_id"]
+                for call in api_client.studies.attach_pdf.call_args_list
+            },
+        )
+
+    def test_grouped_archives_align_partially_overlapping_signatures(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [
+            ["instance-a"], ["instance-b"], ["instance-c"],
+        ]
+        api_client.instances.get_parent_study_id.side_effect = [
+            "study-a", "study-b", "study-c",
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with zipfile.ZipFile(Path(temp_dir, "batch-images.zip"), "w") as archive:
+                for study in ("a", "b", "c"):
+                    archive.writestr(f"{study}.dcm", f"dicom-{study}".encode())
+            report_archives = (
+                ("batch-pdf.zip", "c"),
+                ("batch-report.zip", "a"),
+                ("batch-reports.zip", "b"),
+            )
+            for archive_name, study in report_archives:
+                with zipfile.ZipFile(Path(temp_dir, archive_name), "w") as archive:
+                    archive.writestr(f"{study}.pdf", f"pdf-{study}".encode())
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            {"a.pdf": "study-a", "b.pdf": "study-b", "c.pdf": "study-c"},
             {
                 Path(call.kwargs["pdf_path"]).name: call.kwargs["study_id"]
                 for call in api_client.studies.attach_pdf.call_args_list
