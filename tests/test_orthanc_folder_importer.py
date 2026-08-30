@@ -536,7 +536,8 @@ class TestOrthancFolderImporter(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             input_path = Path(temp_dir, "input")
             input_path.mkdir()
-            Path(input_path, "README.txt").write_text("metadata")
+            readme_path = Path(input_path, "README.txt")
+            readme_path.write_text("metadata")
             for name in ("a", "b"):
                 unit_path = Path(input_path, name)
                 unit_path.mkdir()
@@ -555,7 +556,11 @@ class TestOrthancFolderImporter(unittest.TestCase):
                 dicomize_pdf=True,
             )
 
-            importer.execute()
+            with mock.patch(
+                "orthanc_tools.orthanc_folder_importer.os.path.islink",
+                side_effect=lambda path: Path(path) == readme_path,
+            ):
+                importer.execute()
 
             self.assertEqual(
                 [str(Path(input_path, "a")), str(Path(input_path, "b"))],

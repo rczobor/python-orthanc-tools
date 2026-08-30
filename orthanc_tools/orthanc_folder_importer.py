@@ -195,19 +195,19 @@ class OrthancFolderImporter:
         Then apply the labels on the study
         """
 
+        is_file = os.path.isfile(path_to_upload)
+        if is_file and self._is_skipped_file(path_to_upload):
+            _, ext = os.path.splitext(path_to_upload)
+            logger.info(f"Skipping file with extension {ext}: {path_to_upload}")
+            return study_orthanc_id
+
         if self._dicomize_pdf and os.path.islink(path_to_upload):
             raise _UnsafePdfImport(
                 f"PDF import units cannot contain a symbolic link: {path_to_upload}"
             )
 
         # file path case
-        if os.path.isfile(path_to_upload):
-            # check skip extensions
-            _, ext = os.path.splitext(path_to_upload)
-            if self._is_skipped_file(path_to_upload):
-                logger.info(f"Skipping file with extension {ext}: {path_to_upload}")
-                return study_orthanc_id
-
+        if is_file:
             # zip file case
             if self._is_zip_archive(path_to_upload):
                 with tempfile.TemporaryDirectory() as tempDir:
