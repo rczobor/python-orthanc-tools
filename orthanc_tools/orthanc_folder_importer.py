@@ -41,8 +41,8 @@ class OrthancFolderImporter:
     Upload all the DICOM files contained in a folder (and its sub folders).
     It is a little bit smart:
     - There is a retry for every file and when it fails anyway, the file path is logged, but the script keeps working
-    - Every sub folder uploaded (even with errors for some files) is logged, so that if the script is interrupted and
-    restarted, it will restart from the last succeeded folder.
+    - Regular imports checkpoint processed subfolders. PDF imports checkpoint the complete import unit only after every
+    DICOM upload and PDF attachment succeeds.
     - Zip files are unziped before upload
     '''
     def __init__(self,
@@ -264,9 +264,15 @@ class OrthancFolderImporter:
             ## process them
 
             study_id = study_orthanc_id
-            path_entries = self._list_and_sort_dir(path_to_upload)
-            for path in path_entries:
-                full_path = os.path.join(path_to_upload, path)
+            if self._dicomize_pdf:
+                paths_to_import = self._list_pdf_import_files(path_to_upload)
+            else:
+                paths_to_import = [
+                    os.path.join(path_to_upload, path)
+                    for path in self._list_and_sort_dir(path_to_upload)
+                ]
+
+            for full_path in paths_to_import:
                 study_id = self.upload_and_label(path_to_upload=full_path, study_orthanc_id=study_id)
 
             # let's process this folder
@@ -333,19 +339,22 @@ class OrthancFolderImporter:
 
         return path_entries
 
-    def _is_folder_containing_folders_only(self, folder_path):
-        '''
-        Will return True if there are only subfolders in the considered folder
-        Else: False
-        NB: is there are files which are not importable (different from pdf/dcm)
-        they are ignored.
-        '''
-        for path in os.listdir(path=folder_path):
-            full_path = os.path.join(self._folder_path, path)
-            if os.path.isfile(full_path) and full_path.lower().endswith((".pdf", ".dcm")):
-                return False
+    def _list_pdf_import_files(self, folder_path):
+        paths = []
+        for current_path, directory_names, file_names in os.walk(folder_path):
+            directory_names.sort(key=str.lower)
+            for file_name in sorted(file_names, key=str.lower):
+                full_path = os.path.join(current_path, file_name)
+                if full_path.lower().endswith(".zip") and zipfile.is_zipfile(full_path):
+                    raise _UnsafePdfImport(
+                        f"Nested ZIP archives are not supported in a PDF import folder: {full_path}"
+                    )
+                paths.append(full_path)
 
-        return True
+        return sorted(
+            paths,
+            key=lambda path: (path.lower().endswith(".pdf"), path.lower())
+        )
 
 
     def execute(self):
@@ -369,15 +378,13 @@ class OrthancFolderImporter:
 
         # let's browse the main folder to feed the message queue
 
-        # if there are subfolders only, we will benefit from the multithreading
-        if self._is_folder_containing_folders_only(self._folder_path):
+        # PDF association requires one worker to process the root as a single unit.
+        if self._dicomize_pdf:
+            self._messages.put(self._folder_path)
+        else:
             for path in os.listdir(path=self._folder_path):
                 full_path = os.path.join(self._folder_path, path)
                 self._messages.put(full_path) # if the queue is full, this will block until there's a free slot
-
-        # if there are files, we won't (so that pdf can be handled)
-        else:
-            self._messages.put(self._folder_path)
 
         # let's wait for the completion of all threads
         self.stop()

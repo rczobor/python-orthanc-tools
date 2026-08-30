@@ -84,6 +84,31 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
         api_client.studies.attach_pdf.assert_not_called()
 
+    def test_pdf_import_validates_root_study_before_attaching_nested_pdf(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-1"], ["instance-2"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-1", "study-2"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            nested_path = Path(temp_dir, "nested")
+            nested_path.mkdir()
+            Path(nested_path, "image.dcm").write_bytes(b"dicom-1")
+            Path(nested_path, "report.pdf").write_bytes(b"pdf")
+            Path(temp_dir, "image.dcm").write_bytes(b"dicom-2")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "multiple studies"):
+                importer.upload_and_label(temp_dir)
+
+        api_client.studies.attach_pdf.assert_not_called()
+
     def test_failed_pdf_import_is_not_checkpointed(self):
         api_client = mock.Mock()
         api_client.upload.return_value = []
@@ -158,6 +183,26 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "Importer worker failed"):
                 importer.execute()
+
+            self.assertFalse(state_path.exists())
+
+    def test_non_pdf_mode_does_not_checkpoint_mutable_import_root(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-1"]
+        api_client.instances.get_parent_study_id.return_value = "study-1"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "image.dcm").write_bytes(b"dicom")
+            state_path = Path(temp_dir, "state.txt")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=str(state_path),
+                worker_threads_count=1,
+            )
+
+            importer.execute()
 
             self.assertFalse(state_path.exists())
 
