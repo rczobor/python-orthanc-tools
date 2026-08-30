@@ -23,6 +23,10 @@ ORTHANC_READY_RECHECK_DELAY_SECONDS = 5
 ORTHANC_READY_MAX_CHECKS = 12
 
 
+class _UnsafePdfImport(RuntimeError):
+    pass
+
+
 def resolve_errors_path(errors_path: str = None, error_folder_path: str = None):
     if errors_path:
         return errors_path
@@ -61,6 +65,7 @@ class OrthancFolderImporter:
 
         self._worker_threads_count = worker_threads_count
         self._worker_threads = []
+        self._worker_errors = []
         self._messages = queue.Queue(maxsize=2*worker_threads_count)  # this is thread safe https://docs.python.org/3.5/library/queue.html#module-queue
 
         self._folders_uploaded = []
@@ -131,102 +136,125 @@ class OrthancFolderImporter:
             _, ext = os.path.splitext(path_to_upload)
             if ext.lower() in self._skip_extensions:
                 logger.info(f"Skipping file with extension {ext}: {path_to_upload}")
-                return
+                return study_orthanc_id
 
             # zip file case
             if path_to_upload.lower().endswith("zip") and zipfile.is_zipfile(path_to_upload):
                 with tempfile.TemporaryDirectory() as tempDir:
                     with zipfile.ZipFile(path_to_upload, 'r') as z:
                         z.extractall(tempDir)
-                    study_id = None
-                    for path in os.listdir(tempDir):
+                    study_id = study_orthanc_id
+                    for path in self._list_and_sort_dir(tempDir):
                         full_path = os.path.join(tempDir, path)
-                        study_id = self.upload_and_label(path_to_upload=full_path, study_orthanc_id=study_orthanc_id)
+                        study_id = self.upload_and_label(path_to_upload=full_path, study_orthanc_id=study_id)
                     return study_id
 
-            elif self._dicomize_pdf and path_to_upload.lower().endswith(".pdf"):
+            is_pdf = self._dicomize_pdf and path_to_upload.lower().endswith(".pdf")
+            if is_pdf and study_orthanc_id is None:
+                self.add_file_name_in_errors_log(file_path=path_to_upload)
+                raise _UnsafePdfImport(f"PDF report has no study in its import unit: {path_to_upload}")
 
-                self._api_client.studies.attach_pdf(study_id=study_orthanc_id, pdf_path=path_to_upload, series_description="PDF report")
-                return study_orthanc_id
+            retry_count = 0
+            retry_delays = [5, 20, 60, 300, 900, 1800, 3600, 7200]
 
-            else:
-                retry_count = 0
-                retry_delays = [5, 20, 60, 300, 900, 1800, 3600, 7200]
+            while retry_count <= self._max_retries:
+                if retry_count >= 1:
+                    delay = retry_delays[retry_count - 1]
+                    logger.info(f"waiting {delay} seconds before retrying the upload of {path_to_upload}")
+                    time.sleep(delay)
+                try:
+                    if is_pdf:
+                        self._api_client.studies.attach_pdf(
+                            study_id=study_orthanc_id,
+                            pdf_path=path_to_upload,
+                            series_description="PDF report",
+                        )
+                        return study_orthanc_id
 
-                while retry_count <= self._max_retries:
-                    if retry_count >= 1:
-                        delay = retry_delays[retry_count - 1]
-                        logger.info(f"waiting {delay} seconds before retrying the upload of {path_to_upload}")
-                        time.sleep(delay)
-                    try:
-                        # here, we should have only files (and no zip file)
+                    # here, we should have only files (and no zip file)
 
-                        # let's modify/filter the file if needed
-                        with open(path_to_upload, 'rb') as f:
-                            buffer = f.read()
-                            buffer = self.process_dicom_file(buffer)
+                    # let's modify/filter the file if needed
+                    with open(path_to_upload, 'rb') as f:
+                        buffer = f.read()
+                        buffer = self.process_dicom_file(buffer)
 
-                        # filtering out case
-                        if buffer is None:
-                            logger.debug(f"File {path_to_upload} has been filtered out.")
-                            return study_orthanc_id
+                    # filtering out case
+                    if buffer is None:
+                        logger.debug(f"File {path_to_upload} has been filtered out.")
+                        return study_orthanc_id
 
-                        # modification case: let's upload the file
-                        logger.info(f"uploading {path_to_upload}")
-                        instance_orthanc_ids = self._api_client.upload(buffer, ignore_errors=True)
+                    # modification case: let's upload the file
+                    logger.info(f"uploading {path_to_upload}")
+                    instance_orthanc_ids = self._api_client.upload(buffer, ignore_errors=True)
 
-                        if not instance_orthanc_ids:
-                            # If we got nothing back, it might be a file error OR Orthanc is actually down
-                            # and the ignore_errors=True swallowed a connection error.
-                            if not self._api_client.is_alive():
-                                if self._wait_until_orthanc_is_ready():
-                                    continue # retry this same file
-                                raise exceptions.ConnectionError(f"Orthanc remained unreachable while uploading {path_to_upload}")
-
-                            logger.error(f"File not uploaded (likely invalid DICOM): {path_to_upload}.")
-                            self.add_file_name_in_errors_log(file_path=path_to_upload)
-                            return study_orthanc_id
-
-                        study_id = self._api_client.instances.get_parent_study_id(instance_orthanc_ids[0])
-
-                        # we label for each instance, not at the end of the study, so that there is never an unlabeled image in Orthanc
-                        if self._labels_list is not None:
-                            self._api_client.studies.add_labels(orthanc_id=study_id, labels=self._labels_list)
-
-                        return study_id
-
-                    except (exceptions.ConnectionError, exceptions.OrthancApiException) as e:
-                        # Handle connection issues without consuming retry count
+                    if not instance_orthanc_ids:
+                        # If we got nothing back, it might be a file error OR Orthanc is actually down
+                        # and the ignore_errors=True swallowed a connection error.
                         if not self._api_client.is_alive():
-                            logger.warning(f"Connection error: {str(e)}. Waiting for Orthanc...")
                             if self._wait_until_orthanc_is_ready():
-                                continue # Try the same file again
+                                continue # retry this same file
+                            raise exceptions.ConnectionError(f"Orthanc remained unreachable while uploading {path_to_upload}")
 
-                        # If it's a different Orthanc error (e.g. 400 Bad Request), treat as a normal retry/fail
-                        if retry_count == self._max_retries:
-                            logger.error(f"Error while uploading this file: {path_to_upload}. Exception: {str(e)}")
-                            logger.error(f"too many attempts, logging the file name...")
-                            self.add_file_name_in_errors_log(file_path=path_to_upload)
-                            break
-                        else:
-                            retry_count += 1
-                            logger.warning(f"Error while uploading this file, retrying...: {path_to_upload}. Exception: {str(e)}")
-                    except Exception as e:
-                        if retry_count == self._max_retries:
-                            logger.error(f"Error while uploading this file: {path_to_upload}. Exception: {str(e)}")
-                            logger.error(f"too many attempts, logging the file name...")
-                            self.add_file_name_in_errors_log(file_path=path_to_upload)
-                            break
-                        else:
-                            retry_count += 1
-                            logger.warning(f"Error while uploading this file, retrying...: {path_to_upload}. Exception: {str(e)}")
+                        logger.error(f"File not uploaded (likely invalid DICOM): {path_to_upload}.")
+                        self.add_file_name_in_errors_log(file_path=path_to_upload)
+                        if self._dicomize_pdf:
+                            raise _UnsafePdfImport(f"File not uploaded: {path_to_upload}")
+                        return study_orthanc_id
 
-                return study_orthanc_id
+                    study_id = self._api_client.instances.get_parent_study_id(instance_orthanc_ids[0])
+                    if (
+                        self._dicomize_pdf
+                        and study_orthanc_id is not None
+                        and study_id != study_orthanc_id
+                    ):
+                        raise _UnsafePdfImport(
+                            f"PDF import unit contains multiple studies: {study_orthanc_id}, {study_id}"
+                        )
+
+                    # we label for each instance, not at the end of the study, so that there is never an unlabeled image in Orthanc
+                    if self._labels_list is not None:
+                        self._api_client.studies.add_labels(orthanc_id=study_id, labels=self._labels_list)
+
+                    return study_id
+
+                except _UnsafePdfImport:
+                    raise
+                except (exceptions.ConnectionError, exceptions.OrthancApiException) as e:
+                    # Handle connection issues without consuming retry count
+                    if not self._api_client.is_alive():
+                        logger.warning(f"Connection error: {str(e)}. Waiting for Orthanc...")
+                        if self._wait_until_orthanc_is_ready():
+                            continue # Try the same file again
+
+                    # If it's a different Orthanc error (e.g. 400 Bad Request), treat as a normal retry/fail
+                    if retry_count == self._max_retries:
+                        logger.error(f"Error while uploading this file: {path_to_upload}. Exception: {str(e)}")
+                        logger.error(f"too many attempts, logging the file name...")
+                        self.add_file_name_in_errors_log(file_path=path_to_upload)
+                        if self._dicomize_pdf:
+                            raise
+                        break
+                    else:
+                        retry_count += 1
+                        logger.warning(f"Error while uploading this file, retrying...: {path_to_upload}. Exception: {str(e)}")
+                except Exception as e:
+                    if retry_count == self._max_retries:
+                        logger.error(f"Error while uploading this file: {path_to_upload}. Exception: {str(e)}")
+                        logger.error(f"too many attempts, logging the file name...")
+                        self.add_file_name_in_errors_log(file_path=path_to_upload)
+                        if self._dicomize_pdf:
+                            raise
+                        break
+                    else:
+                        retry_count += 1
+                        logger.warning(f"Error while uploading this file, retrying...: {path_to_upload}. Exception: {str(e)}")
+
+            return study_orthanc_id
 
         # folder case
         elif os.path.isdir(path_to_upload):
             # this folder could have been processed in a previous run of the script
-            if path_to_upload in self._folders_uploaded:
+            if not self._dicomize_pdf and path_to_upload in self._folders_uploaded:
                 logger.info(f"Folder {path_to_upload} already processed, skipping...")
                 return study_orthanc_id
 
@@ -235,7 +263,7 @@ class OrthancFolderImporter:
             ##  sort them (pdf at the end)
             ## process them
 
-            study_id = None
+            study_id = study_orthanc_id
             path_entries = self._list_and_sort_dir(path_to_upload)
             for path in path_entries:
                 full_path = os.path.join(path_to_upload, path)
@@ -248,7 +276,8 @@ class OrthancFolderImporter:
             #     self.upload_and_label(path_to_upload=full_path)
 
             # let's add this folder path in the processed ones:
-            self.add_folder_path_in_state_file(path_to_upload)
+            if not self._dicomize_pdf:
+                self.add_folder_path_in_state_file(path_to_upload)
             return study_id
 
     def process_dicom_file(self, file_content: bytes) -> bytes:
@@ -274,10 +303,19 @@ class OrthancFolderImporter:
                 self._messages.task_done()
                 break
 
-            # path is the full path of a file or a folder
-            self.upload_and_label(path_to_upload=path)
-
-            self._messages.task_done()  # tell the queue the item has been processed
+            try:
+                if self._dicomize_pdf and str(path) in self._folders_uploaded:
+                    logger.info(f"Folder {path} already processed, skipping...")
+                else:
+                    self.upload_and_label(path_to_upload=path)
+                    if self._dicomize_pdf and os.path.isdir(path):
+                        self.add_folder_path_in_state_file(path)
+            except Exception as error:
+                logger.error(f"Importer worker failed while processing {path}: {error}", exc_info=True)
+                with self._lock:
+                    self._worker_errors.append((path, error))
+            finally:
+                self._messages.task_done()  # tell the queue the item has been processed
 
         logger.debug("Processing thread stopped")
 
@@ -343,6 +381,10 @@ class OrthancFolderImporter:
 
         # let's wait for the completion of all threads
         self.stop()
+
+        if self._worker_errors:
+            path, error = self._worker_errors[0]
+            raise RuntimeError(f"Importer worker failed while processing {path}") from error
 
         logger.info("End of upload!")
 

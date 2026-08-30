@@ -1250,15 +1250,18 @@ class Test3Orthancs(unittest.TestCase):
     def test_folder_importer_with_pdf_file(self):
         self.oa.delete_all_content()
         with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = pathlib.Path(temp_dir, "input")
+            input_path.mkdir()
+            shutil.copy(here / "stimuli/CT_small.dcm", input_path)
+            shutil.copy(here / "stimuli/sample.pdf", input_path)
             errors_path = os.path.join(temp_dir, 'errors.txt')
             state_path = os.path.join(temp_dir, 'folders.txt')
-            importer = OrthancFolderImporter(api_client=self.oa, folder_path=here / "stimuli", errors_path=errors_path, state_path=state_path, max_retries=0, dicomize_pdf=True)
+            importer = OrthancFolderImporter(api_client=self.oa, folder_path=input_path, errors_path=errors_path, state_path=state_path, max_retries=0, dicomize_pdf=True)
             importer.execute()
 
-            self.assertEqual(6, len(self.oa.instances.get_all_ids()))
-            with open(errors_path, 'r') as file:
-                lines = file.readlines()
-                self.assertEqual(2, len(lines))
+            self.assertEqual(2, len(self.oa.instances.get_all_ids()))
+            self.assertEqual(1, len(self.oa.studies.get_all_ids()))
+            self.assertFalse(os.path.exists(errors_path))
 
     def test_orthanc_syncher_as_a_migrator(self):
         self.oa.delete_all_content()
