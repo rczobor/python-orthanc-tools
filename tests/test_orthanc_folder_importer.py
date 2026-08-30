@@ -1546,6 +1546,41 @@ class TestOrthancFolderImporter(unittest.TestCase):
             },
         )
 
+    def test_archive_signatures_match_arbitrary_images_by_study_directory(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+        attachments = []
+        api_client.studies.attach_pdf.side_effect = lambda study_id, pdf_path, **_: (
+            attachments.append((Path(pdf_path).read_bytes(), study_id))
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_members = (
+                ("batch-dicom.zip", "a/1.dcm", b"dicom-a"),
+                ("batch-images.zip", "b/1.dcm", b"dicom-b"),
+                ("batch-pdf.zip", "b/report.pdf", b"pdf-b"),
+                ("batch-reports.zip", "a/report.pdf", b"pdf-a"),
+            )
+            for archive_name, member_name, content in archive_members:
+                with zipfile.ZipFile(Path(temp_dir, archive_name), "w") as archive:
+                    archive.writestr(member_name, content)
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            [(b"pdf-a", "study-a"), (b"pdf-b", "study-b")],
+            sorted(attachments),
+        )
+
     def test_archive_signatures_preserve_member_names_under_shared_parent(self):
         api_client = mock.Mock()
         api_client.upload.side_effect = [["instance-a"], ["instance-b"]]

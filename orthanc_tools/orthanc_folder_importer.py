@@ -548,7 +548,7 @@ class OrthancFolderImporter:
                                 if member_group == report_group
                                 or any(
                                     member_group.startswith(f"{report_group}{separator}")
-                                    for separator in ("-", "_", ".", " ")
+                                    for separator in (os.sep, "-", "_", ".", " ")
                                 )
                             ),
                             key=len,
