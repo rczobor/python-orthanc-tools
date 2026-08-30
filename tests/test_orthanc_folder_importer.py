@@ -232,6 +232,76 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
             self.assertFalse(state_path.exists())
 
+    def test_pdf_mode_treats_sibling_folders_as_independent_units(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-1"], ["instance-2"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-1", "study-2"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir, "input")
+            input_path.mkdir()
+            for name in ("a", "b"):
+                unit_path = Path(input_path, name)
+                unit_path.mkdir()
+                Path(unit_path, "image.dcm").write_bytes(b"dicom")
+                Path(unit_path, "report.pdf").write_bytes(b"pdf")
+            state_path = Path(temp_dir, "state.txt")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=str(input_path),
+                errors_path=None,
+                state_path=str(state_path),
+                max_retries=0,
+                worker_threads_count=1,
+                dicomize_pdf=True,
+            )
+
+            importer.execute()
+
+            self.assertEqual(
+                [str(Path(input_path, "a")), str(Path(input_path, "b"))],
+                state_path.read_text().splitlines(),
+            )
+
+        self.assertEqual(
+            [mock.call(study_id="study-1", pdf_path=mock.ANY, series_description="PDF report"),
+             mock.call(study_id="study-2", pdf_path=mock.ANY, series_description="PDF report")],
+            api_client.studies.attach_pdf.call_args_list,
+        )
+
+    def test_pdf_mode_imports_and_checkpoints_a_root_zip_unit(self):
+        api_client = mock.Mock()
+        api_client.upload.return_value = ["instance-1"]
+        api_client.instances.get_parent_study_id.return_value = "study-1"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir, "input")
+            input_path.mkdir()
+            archive_path = Path(input_path, "study.zip")
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("report.pdf", b"pdf")
+                archive.writestr("image.dcm", b"dicom")
+            state_path = Path(temp_dir, "state.txt")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=str(input_path),
+                errors_path=None,
+                state_path=str(state_path),
+                max_retries=0,
+                worker_threads_count=1,
+                dicomize_pdf=True,
+            )
+
+            importer.execute()
+
+            self.assertEqual([str(archive_path)], state_path.read_text().splitlines())
+
+        api_client.studies.attach_pdf.assert_called_once_with(
+            study_id="study-1",
+            pdf_path=mock.ANY,
+            series_description="PDF report",
+        )
+
     def test_cli_help_builds_parser(self):
         result = subprocess.run(
             [sys.executable, "-m", "orthanc_tools.orthanc_folder_importer", "--help"],

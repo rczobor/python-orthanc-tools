@@ -319,7 +319,10 @@ class OrthancFolderImporter:
                     logger.info(f"Folder {path} already processed, skipping...")
                 else:
                     self.upload_and_label(path_to_upload=path)
-                    if self._dicomize_pdf and os.path.isdir(path):
+                    if (
+                        self._dicomize_pdf
+                        and (os.path.isdir(path) or zipfile.is_zipfile(path))
+                    ):
                         self.add_folder_path_in_state_file(path)
             except Exception as error:
                 logger.error(f"Importer worker failed while processing {path}: {error}", exc_info=True)
@@ -361,6 +364,13 @@ class OrthancFolderImporter:
             key=lambda path: (path.lower().endswith(".pdf"), path.lower())
         )
 
+    def _has_direct_dicom_or_pdf_files(self, folder_path):
+        return any(
+            os.path.isfile(os.path.join(folder_path, path))
+            and path.lower().endswith((".dcm", ".pdf"))
+            for path in os.listdir(folder_path)
+        )
+
 
     def execute(self):
         # read state
@@ -383,11 +393,12 @@ class OrthancFolderImporter:
 
         # let's browse the main folder to feed the message queue
 
-        # PDF association requires one worker to process the root as a single unit.
-        if self._dicomize_pdf:
+        # Direct DICOM/PDF files make the root one unit. Otherwise each child is
+        # an independent unit that can be processed and resumed separately.
+        if self._dicomize_pdf and self._has_direct_dicom_or_pdf_files(self._folder_path):
             self._messages.put(self._folder_path)
         else:
-            for path in os.listdir(path=self._folder_path):
+            for path in sorted(os.listdir(path=self._folder_path), key=str.lower):
                 full_path = os.path.join(self._folder_path, path)
                 self._messages.put(full_path) # if the queue is full, this will block until there's a free slot
 
