@@ -425,6 +425,41 @@ class TestOrthancFolderImporter(unittest.TestCase):
             series_description="PDF report",
         )
 
+    def test_nested_report_archive_is_sorted_after_its_dicom(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+        attachments = []
+        api_client.studies.attach_pdf.side_effect = lambda study_id, pdf_path, **_: (
+            attachments.append((Path(pdf_path).read_bytes(), study_id))
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "a.dcm").write_bytes(b"dicom-a")
+            Path(temp_dir, "a.pdf").write_bytes(b"pdf-a")
+            Path(temp_dir, "b.dcm").write_bytes(b"dicom-b")
+            inner_path = Path(temp_dir, "inner.zip")
+            with zipfile.ZipFile(inner_path, "w") as archive:
+                archive.writestr("b.pdf", b"pdf-b")
+            with zipfile.ZipFile(Path(temp_dir, "b-reports.zip"), "w") as archive:
+                archive.write(inner_path, inner_path.name)
+            inner_path.unlink()
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            [(b"pdf-a", "study-a"), (b"pdf-b", "study-b")],
+            attachments,
+        )
+
     def test_unreadable_child_does_not_block_healthy_sibling(self):
         api_client = mock.Mock()
         api_client.upload.return_value = ["instance-id"]
@@ -1436,6 +1471,45 @@ class TestOrthancFolderImporter(unittest.TestCase):
         self.assertEqual(
             ["study-a", "study-b"],
             [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
+        )
+
+    def test_outer_archive_signatures_preserve_nested_archive_names(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+        attachments = []
+        api_client.studies.attach_pdf.side_effect = lambda study_id, pdf_path, **_: (
+            attachments.append((Path(pdf_path).read_bytes(), study_id))
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_members = (
+                ("batch-dicom.zip", "a-images.zip", "image.dcm", b"dicom-a"),
+                ("batch-images.zip", "b-images.zip", "image.dcm", b"dicom-b"),
+                ("batch-pdf.zip", "b-reports.zip", "report.pdf", b"pdf-b"),
+                ("batch-reports.zip", "a-reports.zip", "report.pdf", b"pdf-a"),
+            )
+            inner_path = Path(temp_dir, "inner.zip")
+            for outer_name, nested_name, member_name, content in archive_members:
+                with zipfile.ZipFile(inner_path, "w") as archive:
+                    archive.writestr(member_name, content)
+                with zipfile.ZipFile(Path(temp_dir, outer_name), "w") as archive:
+                    archive.write(inner_path, nested_name)
+            inner_path.unlink()
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            [(b"pdf-a", "study-a"), (b"pdf-b", "study-b")],
+            sorted(attachments),
         )
 
     def test_archive_signatures_preserve_member_parent_paths(self):

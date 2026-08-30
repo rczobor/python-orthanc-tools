@@ -398,6 +398,33 @@ class OrthancFolderImporter:
                     return stem[:-len(suffix)]
         return stem
 
+    @staticmethod
+    def _archive_member_names(archive, prefix=()):
+        names = []
+        for member in archive.infolist():
+            if member.is_dir():
+                continue
+            member_parts = Path(member.filename.lower()).parts
+            if member.filename.lower().endswith(".zip"):
+                try:
+                    nested_prefix = (
+                        prefix
+                        + member_parts[:-1]
+                        + (os.path.splitext(member_parts[-1])[0],)
+                    )
+                    with zipfile.ZipFile(io.BytesIO(archive.read(member)), "r") as nested:
+                        names.extend(
+                            OrthancFolderImporter._archive_member_names(
+                                nested,
+                                nested_prefix,
+                            )
+                        )
+                    continue
+                except zipfile.BadZipFile:
+                    pass
+            names.append(os.path.join(*(prefix + member_parts)))
+        return names
+
     def _matching_report_group(self, name, path_entries):
         role_names = {"image", "images", "dicom", "report", "reports", "pdf", "pdfs"}
 
@@ -442,29 +469,13 @@ class OrthancFolderImporter:
         return self._matching_report_group(name, path_entries) is not None
 
     def _paired_archive_groups(self, folder_path, path_entries):
-
-        def list_member_names(archive):
-            names = []
-            for member in archive.infolist():
-                if member.is_dir():
-                    continue
-                if member.filename.lower().endswith(".zip"):
-                    try:
-                        with zipfile.ZipFile(io.BytesIO(archive.read(member)), "r") as nested:
-                            names.extend(list_member_names(nested))
-                        continue
-                    except zipfile.BadZipFile:
-                        pass
-                names.append(member.filename.lower())
-            return names
-
         groups = {}
         for name in path_entries:
             path = os.path.join(folder_path, name)
             if not os.path.isfile(path) or not zipfile.is_zipfile(path):
                 continue
             with zipfile.ZipFile(path, "r") as archive:
-                member_names = list_member_names(archive)
+                member_names = self._archive_member_names(archive)
             has_pdf = any(member.endswith(".pdf") for member in member_names)
             has_dicom = any(
                 not member.endswith(".pdf")
@@ -583,7 +594,7 @@ class OrthancFolderImporter:
                 return 2 if 2 in priorities else 0
             if zipfile.is_zipfile(path):
                 with zipfile.ZipFile(path, "r") as archive:
-                    lower_names = [name.lower() for name in archive.namelist()]
+                    lower_names = self._archive_member_names(archive)
                 if any(name.endswith(".dcm") for name in lower_names):
                     return 1
                 if any(name.endswith(".pdf") for name in lower_names):
