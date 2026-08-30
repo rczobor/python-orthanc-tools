@@ -144,6 +144,11 @@ class OrthancFolderImporter:
                     with zipfile.ZipFile(path_to_upload, 'r') as z:
                         z.extractall(tempDir)
                     study_id = study_orthanc_id
+                    if self._dicomize_pdf:
+                        return self.upload_and_label(
+                            path_to_upload=tempDir,
+                            study_orthanc_id=study_id,
+                        )
                     for path in self._list_and_sort_dir(tempDir):
                         full_path = os.path.join(tempDir, path)
                         study_id = self.upload_and_label(path_to_upload=full_path, study_orthanc_id=study_id)

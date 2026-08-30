@@ -61,6 +61,32 @@ class TestOrthancFolderImporter(unittest.TestCase):
             series_description="PDF report",
         )
 
+    def test_zip_pdf_validates_all_studies_before_attaching_nested_pdf(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-1"], ["instance-2"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-1", "study-2"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir, "study.zip")
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("nested/image.dcm", b"dicom-1")
+                archive.writestr("nested/report.pdf", b"pdf")
+                archive.writestr("image.dcm", b"dicom-2")
+
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "multiple studies"):
+                importer.upload_and_label(str(archive_path))
+
+        api_client.studies.attach_pdf.assert_not_called()
+
     def test_pdf_import_rejects_multiple_studies_in_one_folder(self):
         api_client = mock.Mock()
         api_client.upload.side_effect = [["instance-1"], ["instance-2"]]
