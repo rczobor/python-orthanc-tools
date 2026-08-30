@@ -1442,6 +1442,43 @@ class TestOrthancFolderImporter(unittest.TestCase):
             },
         )
 
+    def test_grouped_archives_keep_extra_overlapping_reports_with_exact_pair(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with zipfile.ZipFile(Path(temp_dir, "batch-images.zip"), "w") as archive:
+                archive.writestr("a.dcm", b"dicom-a")
+                archive.writestr("b.dcm", b"dicom-b")
+            with zipfile.ZipFile(Path(temp_dir, "batch-reports.zip"), "w") as archive:
+                archive.writestr("a.pdf", b"pdf-a")
+                archive.writestr("b.pdf", b"pdf-b")
+            with zipfile.ZipFile(Path(temp_dir, "batch-pdf.zip"), "w") as archive:
+                archive.writestr("a-report.pdf", b"pdf-a-extra")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            {
+                "a.pdf": "study-a",
+                "a-report.pdf": "study-a",
+                "b.pdf": "study-b",
+            },
+            {
+                Path(call.kwargs["pdf_path"]).name: call.kwargs["study_id"]
+                for call in api_client.studies.attach_pdf.call_args_list
+            },
+        )
+
     def test_paired_archive_sets_active_group_for_later_failed_instance(self):
         api_client = mock.Mock()
         api_client.upload.side_effect = [["instance-a"], []]

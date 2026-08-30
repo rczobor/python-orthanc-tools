@@ -293,14 +293,6 @@ class OrthancFolderImporter:
                                 if priority == 2
                             ]
 
-                            def signatures_are_disjoint(signatures):
-                                seen = set()
-                                for signature in signatures:
-                                    if seen & signature:
-                                        return False
-                                    seen.update(signature)
-                                return True
-
                             def archive_paths_are_unique():
                                 seen_by_role = {1: set(), 2: set()}
                                 for archive_name, priority, _ in archive_group:
@@ -318,16 +310,9 @@ class OrthancFolderImporter:
 
                             image_members = set().union(*image_signatures)
                             report_members = set().union(*report_signatures)
-                            exact_signature_match = bool(
-                                {tuple(sorted(signature)) for signature in image_signatures}
-                                & {tuple(sorted(signature)) for signature in report_signatures}
-                            )
                             align_by_members = (
                                 bool(image_members)
                                 and image_members == report_members
-                                and not exact_signature_match
-                                and signatures_are_disjoint(image_signatures)
-                                and signatures_are_disjoint(report_signatures)
                                 and archive_paths_are_unique()
                             )
                             role_indexes = {1: 0, 2: 0}
@@ -606,20 +591,23 @@ class OrthancFolderImporter:
                     }))
                 normalized_entries.append((name, priority, signature))
             entries = normalized_entries
-            image_signatures = {
-                signature for _, priority, signature in entries if priority == 1
-            }
-            report_signatures = {
-                signature for _, priority, signature in entries if priority == 2
-            }
-            matched_signatures = image_signatures & report_signatures
+            remaining = list(entries)
             matched_names = set()
-            for signature in matched_signatures:
-                signature_entries = [
-                    entry for entry in entries if entry[2] == signature
-                ]
-                add_group(signature_entries)
-                matched_names.update(name for name, _, _ in signature_entries)
+            while remaining:
+                component = [remaining.pop(0)]
+                component_members = set(component[0][2])
+                changed = True
+                while changed:
+                    changed = False
+                    for entry in remaining[:]:
+                        if component_members & set(entry[2]):
+                            component.append(entry)
+                            component_members.update(entry[2])
+                            remaining.remove(entry)
+                            changed = True
+                if {priority for _, priority, _ in component} == {1, 2}:
+                    add_group(component)
+                    matched_names.update(name for name, _, _ in component)
             add_group([
                 entry for entry in entries if entry[0] not in matched_names
             ])
