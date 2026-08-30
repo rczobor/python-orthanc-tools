@@ -173,6 +173,30 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
         api_client.upload.assert_not_called()
 
+    def test_pdf_import_rejects_symlinked_subdirectories(self):
+        api_client = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            linked_path = Path(temp_dir, "linked")
+            linked_path.mkdir()
+            Path(linked_path, "image.dcm").write_bytes(b"dicom")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                dicomize_pdf=True,
+            )
+
+            with mock.patch(
+                "orthanc_tools.orthanc_folder_importer.os.path.islink",
+                side_effect=lambda path: Path(path) == linked_path,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "symbolic link"):
+                    importer.upload_and_label(temp_dir)
+
+        api_client.upload.assert_not_called()
+
     def test_pdf_import_fails_when_an_enumerated_file_disappears(self):
         api_client = mock.Mock()
         api_client.upload.return_value = ["instance-1"]
@@ -443,6 +467,44 @@ class TestOrthancFolderImporter(unittest.TestCase):
 
         api_client.upload.assert_called_once_with(b"dicom", ignore_errors=True)
         api_client.studies.attach_pdf.assert_called_once()
+
+    def test_pdf_mode_ignores_skipped_root_files_when_selecting_units(self):
+        api_client = mock.Mock()
+        api_client.studies.get_pdf_instances.return_value = []
+        api_client.upload.side_effect = [["instance-1"], ["instance-2"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-1", "study-2"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir, "input")
+            input_path.mkdir()
+            Path(input_path, "README.txt").write_text("metadata")
+            for name in ("a", "b"):
+                unit_path = Path(input_path, name)
+                unit_path.mkdir()
+                Path(unit_path, "image.dcm").write_bytes(b"dicom")
+                Path(unit_path, "report.pdf").write_bytes(b"pdf")
+
+            state_path = Path(temp_dir, "state.txt")
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=str(input_path),
+                errors_path=None,
+                state_path=str(state_path),
+                max_retries=0,
+                worker_threads_count=1,
+                skip_extensions=[".txt"],
+                dicomize_pdf=True,
+            )
+
+            importer.execute()
+
+            self.assertEqual(
+                [str(Path(input_path, "a")), str(Path(input_path, "b"))],
+                state_path.read_text().splitlines(),
+            )
+
+        self.assertEqual(2, api_client.upload.call_count)
+        self.assertEqual(2, api_client.studies.attach_pdf.call_count)
 
     def test_pdf_mode_ignores_state_files_inside_a_root_unit(self):
         api_client = mock.Mock()

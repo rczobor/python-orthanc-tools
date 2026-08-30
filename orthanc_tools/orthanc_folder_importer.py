@@ -156,11 +156,16 @@ class OrthancFolderImporter:
         Then apply the labels on the study
         """
 
+        if self._dicomize_pdf and os.path.islink(path_to_upload):
+            raise _UnsafePdfImport(
+                f"PDF import units cannot contain a symbolic link: {path_to_upload}"
+            )
+
         # file path case
         if os.path.isfile(path_to_upload):
             # check skip extensions
             _, ext = os.path.splitext(path_to_upload)
-            if ext.lower() in self._skip_extensions:
+            if self._is_skipped_file(path_to_upload):
                 logger.info(f"Skipping file with extension {ext}: {path_to_upload}")
                 return study_orthanc_id
 
@@ -387,6 +392,9 @@ class OrthancFolderImporter:
             for configured_path in (self._state_path, self._errors_path)
         )
 
+    def _is_skipped_file(self, path):
+        return os.path.splitext(path)[1].lower() in self._skip_extensions
+
     def _list_input_entries(self, folder_path):
         return [
             path
@@ -404,10 +412,20 @@ class OrthancFolderImporter:
             onerror=raise_walk_error,
         ):
             directory_names.sort(key=str.lower)
+            for directory_name in directory_names:
+                full_path = os.path.join(current_path, directory_name)
+                if os.path.islink(full_path):
+                    raise _UnsafePdfImport(
+                        f"PDF import units cannot contain a symbolic link: {full_path}"
+                    )
             for file_name in sorted(file_names, key=str.lower):
                 full_path = os.path.join(current_path, file_name)
                 if self._is_importer_file(full_path):
                     continue
+                if os.path.islink(full_path):
+                    raise _UnsafePdfImport(
+                        f"PDF import units cannot contain a symbolic link: {full_path}"
+                    )
                 if full_path.lower().endswith(".zip") and zipfile.is_zipfile(full_path):
                     raise _UnsafePdfImport(
                         f"Nested ZIP archives are not supported in a PDF import folder: {full_path}"
@@ -432,6 +450,7 @@ class OrthancFolderImporter:
         return any(
             os.path.isfile(os.path.join(folder_path, path))
             and not path.lower().endswith("zip")
+            and not self._is_skipped_file(path)
             for path in self._list_input_entries(folder_path)
         )
 
