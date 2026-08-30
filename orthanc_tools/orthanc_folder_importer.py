@@ -487,11 +487,17 @@ class OrthancFolderImporter:
 
             def member_group(member):
                 member_parts = Path(member).parts
-                if len(member_parts) > 1:
-                    return os.path.join(*member_parts[:-1]).lower()
-                return self._strip_role_suffix(
-                    os.path.splitext(member_parts[-1])[0]
+                parent_parts = [
+                    self._strip_role_suffix(part.lower())
+                    for part in member_parts[:-1]
+                    if part.lower() not in role_names
+                ]
+                stem = self._strip_role_suffix(
+                    os.path.splitext(member_parts[-1])[0].lower()
                 )
+                if stem not in role_names:
+                    parent_parts.append(stem)
+                return os.path.join(*parent_parts) if parent_parts else stem
 
             member_signature = tuple(sorted({
                 member_group(member)
