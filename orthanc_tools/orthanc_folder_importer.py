@@ -663,7 +663,13 @@ class OrthancFolderImporter:
                 else report_directory_groups.get(parts[0])
             )
             prefix = (directory_group,) if directory_group else ()
-            return prefix + tuple(part.lower() for part in parts[1:-1])
+            relative_parent = []
+            for part in parts[1:-1]:
+                lower_part = part.lower()
+                if lower_part in image_roles | report_roles:
+                    continue
+                relative_parent.append(self._strip_role_suffix(lower_part))
+            return prefix + tuple(relative_parent)
 
         centralized_stems = {}
         for name in path_entries:
