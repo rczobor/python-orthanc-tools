@@ -1004,6 +1004,38 @@ class TestOrthancFolderImporter(unittest.TestCase):
             [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
         )
 
+    def test_flat_centralized_reports_pair_nested_study_directories(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for study in ("a", "b"):
+                image_dir = Path(temp_dir, "images", "year", study)
+                report_dir = Path(temp_dir, "reports", "year")
+                image_dir.mkdir(parents=True)
+                report_dir.mkdir(parents=True, exist_ok=True)
+                Path(image_dir, "1.dcm").write_bytes(f"dicom-{study}".encode())
+                Path(report_dir, f"{study}.pdf").write_bytes(f"pdf-{study}".encode())
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            {"a.pdf": "study-a", "b.pdf": "study-b"},
+            {
+                Path(call.kwargs["pdf_path"]).name: call.kwargs["study_id"]
+                for call in api_client.studies.attach_pdf.call_args_list
+            },
+        )
+
     def test_outer_archive_expands_nested_paired_archives(self):
         api_client = mock.Mock()
         api_client.upload.side_effect = [["instance-a"], ["instance-b"]]

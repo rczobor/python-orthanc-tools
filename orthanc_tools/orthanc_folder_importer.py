@@ -700,6 +700,14 @@ class OrthancFolderImporter:
 
         named_centralized_parents = set()
         centralized_parents = {parent for parent, _ in centralized_stems}
+        centralized_parents_by_role = {
+            role: {
+                parent
+                for parent, parent_role in centralized_stems
+                if parent_role == role
+            }
+            for role in ("image", "report")
+        }
         for parent in centralized_parents:
             image_stems = centralized_stems.get((parent, "image"), set())
             report_stems = centralized_stems.get((parent, "report"), set())
@@ -721,10 +729,15 @@ class OrthancFolderImporter:
             if os.path.isfile(path):
                 parts = Path(name).parts
                 if len(parts) > 1 and parts[0] in centralized_dirs:
+                    role = "image" if parts[0] in centralized_image_dirs else "report"
                     parent = centralized_parent(parts)
+                    stem = os.path.splitext(base_name)[0]
                     if parent in named_centralized_parents:
-                        stem = os.path.splitext(base_name)[0]
                         return os.path.join(*parent, stem)
+                    candidate_parent = parent + (strip_role_suffix(stem),)
+                    other_role = "report" if role == "image" else "image"
+                    if candidate_parent in centralized_parents_by_role[other_role]:
+                        return os.path.join(*candidate_parent)
                     if parent:
                         return os.path.join(*parent)
                 return os.path.splitext(base_name)[0]
