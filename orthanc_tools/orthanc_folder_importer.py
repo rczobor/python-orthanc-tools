@@ -318,6 +318,11 @@ class OrthancFolderImporter:
                 self.add_folder_path_in_state_file(path_to_upload)
             return study_id
 
+        elif self._dicomize_pdf:
+            raise _UnsafePdfImport(
+                f"PDF import path disappeared before it could be processed: {path_to_upload}"
+            )
+
     def process_dicom_file(self, file_content: bytes) -> bytes:
         '''
         This method is called just before the upload of the file to Orthanc
@@ -362,7 +367,7 @@ class OrthancFolderImporter:
 
     def _list_and_sort_dir(self, folder_path):
         path_entries = sorted(
-            os.listdir(path=folder_path),
+            self._list_input_entries(folder_path),
             key=lambda name: (
                 2 if name.lower().endswith(".pdf")
                 else 1 if name.lower().endswith(".dcm")
@@ -373,6 +378,21 @@ class OrthancFolderImporter:
 
 
         return path_entries
+
+    def _is_importer_file(self, path):
+        normalized_path = os.path.normcase(os.path.realpath(path))
+        return any(
+            configured_path
+            and normalized_path == os.path.normcase(os.path.realpath(configured_path))
+            for configured_path in (self._state_path, self._errors_path)
+        )
+
+    def _list_input_entries(self, folder_path):
+        return [
+            path
+            for path in os.listdir(path=folder_path)
+            if not self._is_importer_file(os.path.join(folder_path, path))
+        ]
 
     def _list_pdf_import_files(self, folder_path):
         def raise_walk_error(error):
@@ -386,6 +406,8 @@ class OrthancFolderImporter:
             directory_names.sort(key=str.lower)
             for file_name in sorted(file_names, key=str.lower):
                 full_path = os.path.join(current_path, file_name)
+                if self._is_importer_file(full_path):
+                    continue
                 if full_path.lower().endswith(".zip") and zipfile.is_zipfile(full_path):
                     raise _UnsafePdfImport(
                         f"Nested ZIP archives are not supported in a PDF import folder: {full_path}"
@@ -410,7 +432,7 @@ class OrthancFolderImporter:
         return any(
             os.path.isfile(os.path.join(folder_path, path))
             and not path.lower().endswith("zip")
-            for path in os.listdir(folder_path)
+            for path in self._list_input_entries(folder_path)
         )
 
 
@@ -440,7 +462,7 @@ class OrthancFolderImporter:
         if self._dicomize_pdf and self._has_direct_non_archive_files(self._folder_path):
             self._messages.put(self._folder_path)
         else:
-            for path in sorted(os.listdir(path=self._folder_path), key=str.lower):
+            for path in sorted(self._list_input_entries(self._folder_path), key=str.lower):
                 full_path = os.path.join(self._folder_path, path)
                 self._messages.put(full_path) # if the queue is full, this will block until there's a free slot
 
