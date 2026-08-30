@@ -310,32 +310,71 @@ class OrthancFolderImporter:
 
                             image_members = set().union(*image_signatures)
                             report_members = set().union(*report_signatures)
-                            align_by_members = (
+                            member_unions_match = (
                                 bool(image_members)
                                 and image_members == report_members
-                                and archive_paths_are_unique()
                             )
+                            use_shared_role_roots = (
+                                member_unions_match and archive_paths_are_unique()
+                            )
+                            image_signature_keys = {
+                                tuple(sorted(signature)) for signature in image_signatures
+                            }
+                            report_signature_keys = {
+                                tuple(sorted(signature)) for signature in report_signatures
+                            }
+                            matched_signature_indexes = {
+                                signature: index
+                                for index, signature in enumerate(sorted(
+                                    image_signature_keys & report_signature_keys
+                                ))
+                            }
                             role_indexes = {1: 0, 2: 0}
-                            for archive_name, priority, _ in archive_group:
+                            for archive_name, priority, signature in archive_group:
                                 role_dir_parts = [
                                     temp_dir,
                                     "images" if priority == 1 else "reports",
                                 ]
-                                if not align_by_members:
-                                    role_dir_parts.append(str(role_indexes[priority]))
+                                signature_key = tuple(sorted(signature))
+                                if not use_shared_role_roots:
+                                    if signature_key in matched_signature_indexes:
+                                        role_dir_parts.append(
+                                            f"matched-{matched_signature_indexes[signature_key]}"
+                                        )
+                                    else:
+                                        role_dir_parts.append(
+                                            f"unmatched-{priority}-{role_indexes[priority]}"
+                                        )
                                 role_dir = os.path.join(*role_dir_parts)
                                 role_indexes[priority] += 1
                                 os.makedirs(role_dir, exist_ok=True)
                                 archive_path = os.path.join(path_to_upload, archive_name)
                                 with zipfile.ZipFile(archive_path, "r") as archive:
                                     archive.extractall(role_dir)
+                            archive_entries = self._list_and_sort_dir(temp_dir)
+                            final_archive_group = next(
+                                (
+                                    group
+                                    for entry in reversed(archive_entries)
+                                    if not entry.lower().endswith(".pdf")
+                                    and os.path.splitext(entry)[1].lower()
+                                    not in self._skip_extensions
+                                    for group in [self._matching_report_group(
+                                        entry,
+                                        archive_entries,
+                                    )]
+                                    if group is not None
+                                ),
+                                None,
+                            )
                             study_id = self.upload_and_label(
                                 path_to_upload=temp_dir,
                                 study_orthanc_id=study_id,
                             )
                             if study_id is not None:
                                 active_study_group = (
-                                    self._matching_report_group(path, path_entries)
+                                    final_archive_group
+                                    or self._matching_report_group(path, path_entries)
                                     or self._strip_role_suffix(
                                         os.path.splitext(os.path.basename(path.lower()))[0]
                                     )
