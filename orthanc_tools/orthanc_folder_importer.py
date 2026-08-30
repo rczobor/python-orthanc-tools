@@ -1,4 +1,5 @@
 import argparse
+import io
 import logging
 from orthanc_api_client import OrthancApiClient, exceptions
 from typing import List
@@ -398,18 +399,33 @@ class OrthancFolderImporter:
         return stem
 
     def _matching_report_group(self, name, path_entries):
-        stem = os.path.splitext(os.path.basename(name.lower()))[0]
+        role_names = {"image", "images", "dicom", "report", "reports", "pdf", "pdfs"}
+
+        def entry_identity(entry):
+            parts = Path(entry.lower()).parts
+            parent_parts = parts[:-1]
+            if parent_parts and parent_parts[0] in role_names:
+                parent_parts = parent_parts[1:]
+            elif parent_parts:
+                normalized_parent = self._strip_role_suffix(parent_parts[0])
+                if normalized_parent != parent_parts[0]:
+                    parent_parts = (normalized_parent,) + parent_parts[1:]
+            stem = os.path.splitext(parts[-1])[0]
+            return parent_parts, stem
+
+        parent_parts, stem = entry_identity(name)
         report_stems = [
-            os.path.splitext(os.path.basename(candidate.lower()))[0]
+            entry_identity(candidate)
             for candidate in path_entries
             if candidate.lower().endswith(".pdf")
         ]
-        if stem in report_stems:
-            return stem
+        if (parent_parts, stem) in report_stems:
+            return os.path.join(*parent_parts, stem) if parent_parts else stem
 
         candidates = [
             normalized_stem
-            for report_stem in report_stems
+            for report_parent, report_stem in report_stems
+            if report_parent == parent_parts
             for normalized_stem in [self._strip_role_suffix(report_stem)]
             if stem == normalized_stem
             or any(
@@ -417,12 +433,30 @@ class OrthancFolderImporter:
                 for separator in ("-", "_", ".", " ")
             )
         ]
-        return max(candidates, key=len) if candidates else None
+        if not candidates:
+            return None
+        group = max(candidates, key=len)
+        return os.path.join(*parent_parts, group) if parent_parts else group
 
     def _has_paired_report(self, name, path_entries):
         return self._matching_report_group(name, path_entries) is not None
 
     def _paired_archive_groups(self, folder_path, path_entries):
+
+        def list_member_names(archive):
+            names = []
+            for member in archive.infolist():
+                if member.is_dir():
+                    continue
+                if member.filename.lower().endswith(".zip"):
+                    try:
+                        with zipfile.ZipFile(io.BytesIO(archive.read(member)), "r") as nested:
+                            names.extend(list_member_names(nested))
+                        continue
+                    except zipfile.BadZipFile:
+                        pass
+                names.append(member.filename.lower())
+            return names
 
         groups = {}
         for name in path_entries:
@@ -430,11 +464,7 @@ class OrthancFolderImporter:
             if not os.path.isfile(path) or not zipfile.is_zipfile(path):
                 continue
             with zipfile.ZipFile(path, "r") as archive:
-                member_names = [
-                    member.filename.lower()
-                    for member in archive.infolist()
-                    if not member.is_dir()
-                ]
+                member_names = list_member_names(archive)
             has_pdf = any(member.endswith(".pdf") for member in member_names)
             has_dicom = any(
                 not member.endswith(".pdf")
@@ -477,6 +507,33 @@ class OrthancFolderImporter:
                 paired[name] = archive_group
 
         for entries in groups.values():
+            report_member_groups = {
+                member_group
+                for _, priority, signature in entries
+                if priority == 2
+                for member_group in signature
+            }
+            normalized_entries = []
+            for name, priority, signature in entries:
+                if priority == 1:
+                    signature = tuple(sorted({
+                        max(
+                            (
+                                report_group
+                                for report_group in report_member_groups
+                                if member_group == report_group
+                                or any(
+                                    member_group.startswith(f"{report_group}{separator}")
+                                    for separator in ("-", "_", ".", " ")
+                                )
+                            ),
+                            key=len,
+                            default=member_group,
+                        )
+                        for member_group in signature
+                    }))
+                normalized_entries.append((name, priority, signature))
+            entries = normalized_entries
             image_signatures = {
                 signature for _, priority, signature in entries if priority == 1
             }

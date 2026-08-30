@@ -1330,6 +1330,114 @@ class TestOrthancFolderImporter(unittest.TestCase):
             [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
         )
 
+    def test_active_group_includes_centralized_parent(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], []]
+        api_client.instances.get_parent_study_id.return_value = "study-a"
+        api_client.is_alive.return_value = True
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for year in ("year1", "year2"):
+                image_dir = Path(temp_dir, "images", year)
+                report_dir = Path(temp_dir, "reports", year)
+                image_dir.mkdir(parents=True)
+                report_dir.mkdir(parents=True)
+                Path(image_dir, "a-1.dcm").write_bytes(f"dicom-{year}".encode())
+                Path(report_dir, "a.pdf").write_bytes(f"pdf-{year}".encode())
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            ["study-a"],
+            [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
+        )
+
+    def test_archive_signatures_collapse_multi_instance_names(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [
+            ["instance-a-1"],
+            ["instance-a-2"],
+            ["instance-b-1"],
+            ["instance-b-2"],
+        ]
+        api_client.instances.get_parent_study_id.side_effect = [
+            "study-a", "study-a", "study-b", "study-b",
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_members = (
+                ("batch-dicom.zip", ("a-1.dcm", "a-2.dcm")),
+                ("batch-images.zip", ("b-1.dcm", "b-2.dcm")),
+                ("batch-pdf.zip", ("b.pdf",)),
+                ("batch-reports.zip", ("a.pdf",)),
+            )
+            for archive_name, member_names in archive_members:
+                with zipfile.ZipFile(Path(temp_dir, archive_name), "w") as archive:
+                    for member_name in member_names:
+                        archive.writestr(member_name, member_name.encode())
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            {"a.pdf": "study-a", "b.pdf": "study-b"},
+            {
+                Path(call.kwargs["pdf_path"]).name: call.kwargs["study_id"]
+                for call in api_client.studies.attach_pdf.call_args_list
+            },
+        )
+
+    def test_outer_archives_classify_nested_archive_members(self):
+        api_client = mock.Mock()
+        api_client.upload.side_effect = [["instance-a"], ["instance-b"]]
+        api_client.instances.get_parent_study_id.side_effect = ["study-a", "study-b"]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            build_dir = Path(temp_dir, "build")
+            build_dir.mkdir()
+            inner_archives = []
+            for study in ("a", "b"):
+                for role, extension in (("images", ".dcm"), ("reports", ".pdf")):
+                    inner_path = Path(build_dir, f"{study}-{role}.zip")
+                    with zipfile.ZipFile(inner_path, "w") as archive:
+                        archive.writestr(f"{study}{extension}", study.encode())
+                    inner_archives.append((role, inner_path))
+            for role in ("images", "reports"):
+                with zipfile.ZipFile(Path(temp_dir, f"batch-{role}.zip"), "w") as archive:
+                    for archive_role, inner_path in inner_archives:
+                        if archive_role == role:
+                            archive.write(inner_path, inner_path.name)
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                max_retries=0,
+                dicomize_pdf=True,
+            )
+
+            importer.upload_and_label(temp_dir)
+
+        self.assertEqual(
+            ["study-a", "study-b"],
+            [call.kwargs["study_id"] for call in api_client.studies.attach_pdf.call_args_list],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
