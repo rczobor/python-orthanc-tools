@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 import tempfile
@@ -401,6 +402,38 @@ class TestOrthancFolderImporter(unittest.TestCase):
             self.assertEqual([temp_dir], state_path.read_text().splitlines())
 
         api_client.studies.attach_pdf.assert_not_called()
+
+    def test_pdf_attachment_uses_hashed_snapshot_and_rejects_source_replacement(self):
+        api_client = mock.Mock()
+        attached_content = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir, "report.pdf")
+            report_path.write_bytes(b"original")
+            replacement_path = Path(temp_dir, "replacement.pdf")
+            replacement_path.write_bytes(b"replacement")
+
+            def replace_source(_study_id, max_instance_count_in_series_to_analyze):
+                os.replace(replacement_path, report_path)
+                return []
+
+            def capture_attachment(study_id, pdf_path, series_description):
+                attached_content.append(Path(pdf_path).read_bytes())
+
+            api_client.studies.get_pdf_instances.side_effect = replace_source
+            api_client.studies.attach_pdf.side_effect = capture_attachment
+            importer = OrthancFolderImporter(
+                api_client=api_client,
+                folder_path=temp_dir,
+                errors_path=None,
+                state_path=None,
+                dicomize_pdf=True,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "changed while it was being imported"):
+                importer._attach_pdf_idempotently("study-1", str(report_path))
+
+        self.assertEqual([b"original"], attached_content)
 
     def test_failed_pdf_does_not_checkpoint_a_nested_dicom_folder(self):
         api_client = mock.Mock()

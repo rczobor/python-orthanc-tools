@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import logging
+import shutil
 from orthanc_api_client import OrthancApiClient, exceptions
 from typing import List
 import zipfile
@@ -164,15 +165,32 @@ class OrthancFolderImporter:
             os.fsync(state_file.fileno())
 
     def _attach_pdf_idempotently(self, study_id, pdf_path):
-        with open(pdf_path, "rb") as pdf_file:
-            pdf_digest = hashlib.file_digest(pdf_file, "sha256").digest()
-
-        with self._lock:
-            existing_pdf_ids = self._api_client.studies.get_pdf_instances(
-                study_id,
-                max_instance_count_in_series_to_analyze=sys.maxsize,
+        def file_version(path):
+            stat = os.stat(path, follow_symlinks=False)
+            return (
+                stat.st_dev,
+                stat.st_ino,
+                stat.st_size,
+                stat.st_mtime_ns,
+                stat.st_ctime_ns,
             )
-            with tempfile.TemporaryDirectory() as temp_dir:
+
+        source_version = file_version(pdf_path)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_snapshot_path = os.path.join(temp_dir, "report.pdf")
+            shutil.copyfile(pdf_path, pdf_snapshot_path)
+            if file_version(pdf_path) != source_version:
+                raise _UnsafePdfImport(f"PDF changed while it was being imported: {pdf_path}")
+
+            with open(pdf_snapshot_path, "rb") as pdf_file:
+                pdf_digest = hashlib.file_digest(pdf_file, "sha256").digest()
+
+            already_attached = False
+            with self._lock:
+                existing_pdf_ids = self._api_client.studies.get_pdf_instances(
+                    study_id,
+                    max_instance_count_in_series_to_analyze=sys.maxsize,
+                )
                 for instance_id in existing_pdf_ids:
                     existing_pdf_path = os.path.join(temp_dir, f"{instance_id}.pdf")
                     self._api_client.instances.download_pdf(instance_id, existing_pdf_path)
@@ -180,13 +198,18 @@ class OrthancFolderImporter:
                         existing_digest = hashlib.file_digest(existing_pdf_file, "sha256").digest()
                     if existing_digest == pdf_digest:
                         logger.info(f"PDF report already attached to study {study_id}, skipping")
-                        return
+                        already_attached = True
+                        break
 
-            self._api_client.studies.attach_pdf(
-                study_id=study_id,
-                pdf_path=pdf_path,
-                series_description="PDF report",
-            )
+                if not already_attached:
+                    self._api_client.studies.attach_pdf(
+                        study_id=study_id,
+                        pdf_path=pdf_snapshot_path,
+                        series_description="PDF report",
+                    )
+
+            if file_version(pdf_path) != source_version:
+                raise _UnsafePdfImport(f"PDF changed while it was being imported: {pdf_path}")
 
     def upload_and_label(self, path_to_upload, study_orthanc_id=None):
         """
