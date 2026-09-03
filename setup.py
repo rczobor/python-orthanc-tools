@@ -91,10 +91,9 @@ setup(
         # that you indicate you support Python 3. These classifiers are *not*
         # checked by 'pip install'. See instead 'python_requires' below.
         'Programming Language :: Python :: 3',
-        "Programming Language :: Python :: 3.11",
-        "Programming Language :: Python :: 3.12",
-        "Programming Language :: Python :: 3.13",
-        "Programming Language :: Python :: 3.14",
+        'Programming Language :: Python :: 3.8',
+        'Programming Language :: Python :: 3.9',
+        "Programming Language :: Python :: 3.10",
         'Programming Language :: Python :: 3 :: Only',
     ],
 
@@ -121,7 +120,7 @@ setup(
     # 'Programming Language' classifiers above, 'pip install' will check this
     # and refuse to install the project if the version does not match. See
     # https://packaging.python.org/guides/distributing-packages-using-setuptools/#python-requires
-    python_requires='>=3.11, <4',
+    python_requires='>=3.8, <4',
 
     # This field lists other packages that your project depends on to run.
     # Any package you put here will be installed by pip when your project is
@@ -136,11 +135,9 @@ setup(
         'hl7==0.4.2',
         'six',
         'schedule==1.2.0',
-        'backports.zoneinfo; python_version < "3.9"',
         'pika',
         'inquirer',
-        'paramiko',
-        'tzdata; sys_platform == "win32"'
+        'paramiko'
     ],
 
     # List additional groups of dependencies here (e.g. development

@@ -20,8 +20,7 @@ from .orthanc_monitor import ChangeType
 logger = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL_SECONDS = 10
 TERMINAL_METADATA_NAME = "4600"
-UNKNOWN_LOG_CONTEXT_VALUE = "unknown"
-REMOTE_AET_METADATA_NAMES = ("RemoteAET", "RemoteAet")
+
 
 class ForwarderMode(StrEnum):
     DICOM = 'dicom'             # use DICOM
@@ -111,10 +110,8 @@ class ResourceToForward:
 class ForwarderInstancesSetStatus:
     processed: bool = field(init=False, default=False)
     sent_to_destinations: List[str] = field(default_factory=list)
-    last_eligible_destinations: List[str] = field(default_factory=list)
     retry_count: int = field(init=False, default=0)
     next_retry: Optional[datetime.datetime] = None
-    log_context: Optional[str] = None
 
 
 class OrthancForwarder:
@@ -445,7 +442,6 @@ class OrthancForwarder:
     def forward(self, instances_set, already_sent_to_destinations: List[str]) -> Tuple[List[str], List[str]]:  # returns (sent destinations, eligible destinations)
         sent_to_destinations = list(already_sent_to_destinations)
         eligible_destinations = []
-        log_context = self._get_cached_instances_set_log_context(instances_set)
         study_description = None
         study_description_loaded = False
         study_description_error = None
@@ -459,7 +455,7 @@ class OrthancForwarder:
                 destination_retry_key = dest.retry_key
                 if destination_retry_key in already_sent_to_destinations:
                     eligible_destinations.append(destination_retry_key)
-                    logger.info(f"{instances_set} {log_context} Sending ... already sent to {dest.destination} using {dest.forwarder_mode}")
+                    logger.info(f"{instances_set} Sending ... already sent to {dest.destination} using {dest.forwarder_mode}")
                     if self._on_instances_set_forwarded:
                         self._on_instances_set_forwarded(instances_set=instances_set,
                                                          destination=dest.destination)
@@ -488,12 +484,12 @@ class OrthancForwarder:
                         continue
 
                 eligible_destinations.append(destination_retry_key)
-                logger.info(f"{instances_set} {log_context} Sending to {dest.destination} using {dest.forwarder_mode}")
+                logger.info(f"{instances_set} Sending to {dest.destination} using {dest.forwarder_mode}")
                 self._forward_to_destination(
                     instances_set=instances_set,
                     destination=dest
                 )
-                logger.info(f"{instances_set} {log_context} Sent")
+                logger.info(f"{instances_set} Sent")
                 sent_to_destinations.append(destination_retry_key)
 
                 if self._on_instances_set_forwarded:
@@ -501,18 +497,17 @@ class OrthancForwarder:
                                                      destination=dest.destination)
 
             except exceptions.OrthancApiException as ex:
-                logger.error(f"{instances_set} {log_context} Error while forwarding to {dest.destination}: {ex.msg}")
+                logger.error(f"{instances_set} Error while forwarding to {dest.destination}: {ex.msg}")
                 if self._on_instances_set_forward_error:
                     self._on_instances_set_forward_error(instances_set=instances_set,
                                                          destination=dest.destination,
                                                          error=ex.msg)
             except Exception as ex:
-                logger.error(f"{instances_set} {log_context} Error while forwarding to {dest.destination}: {ex}", exc_info=True)
+                logger.error(f"{instances_set} Error while forwarding to {dest.destination}: {ex}", exc_info=True)
                 if self._on_instances_set_forward_error:
                     self._on_instances_set_forward_error(instances_set=instances_set,
                                                          destination=dest.destination,
                                                          error=str(ex))
-
         return sent_to_destinations, eligible_destinations
             # has_been_sent_to = self._source.instances.get_string_metadata(instances_set.instances_ids[0], metadata_name=str(ForwarderMetadata.SENT_TO_DESTINATIONS.value), default_value="").split(",")
 
@@ -524,11 +519,10 @@ class OrthancForwarder:
 
 
     def delete(self, instances_set):
-        log_context = self._get_cached_instances_set_log_context(instances_set)
-        logger.info(f"{instances_set} {log_context} Deleting ...")
+        logger.info(f"{instances_set} Deleting ...")
         del self._status[instances_set.id]
         instances_set.delete()
-        logger.info(f"{instances_set} {log_context} Deleting ... Done")
+        logger.info(f"{instances_set} Deleting ... Done")
 
     def handle_instances_set(self, instances_set: InstancesSet):
 
@@ -544,8 +538,7 @@ class OrthancForwarder:
                 logger.debug(f"{instances_set} Skipping while waiting for retry")
                 return
 
-        log_context = self._get_cached_instances_set_log_context(instances_set)
-        logger.info(f"{instances_set} {log_context} Handling ...")
+        logger.info(f"{instances_set} Handling ...")
 
         # filter
         instances_set = self.filter(instances_set)
@@ -562,7 +555,6 @@ class OrthancForwarder:
         # forward
         sent_to_destinations, eligible_destinations = self.forward(instances_set, status.sent_to_destinations)
         status.sent_to_destinations = sent_to_destinations
-        status.last_eligible_destinations = eligible_destinations
 
         if len(eligible_destinations) == 0:
             self._mark_as_terminal(instances_set)
@@ -575,7 +567,7 @@ class OrthancForwarder:
             self._schedule_retry(instances_set, status)
             return
 
-        logger.info(f"{instances_set} {log_context} Handling ... Done")
+        logger.info(f"{instances_set} Handling ... Done")
 
     def _forward_to_destination(self, instances_set: InstancesSet, destination: ForwarderDestination):
         if destination.forwarder_mode == ForwarderMode.DICOM:
@@ -625,59 +617,6 @@ class OrthancForwarder:
 
         else:
             raise NotImplementedError
-
-    def _get_instances_set_log_context(self, instances_set: InstancesSet) -> str:
-        patient_id = self._get_patient_id(instances_set)
-        sender_aet = self._get_sender_aet(instances_set)
-        return f"PatientID={patient_id} SenderAET={sender_aet}"
-
-    def _get_cached_instances_set_log_context(self, instances_set: InstancesSet) -> str:
-        status = self._status.get(instances_set.id)
-        if status is None:
-            return self._get_instances_set_log_context(instances_set)
-
-        if status.log_context is None:
-            status.log_context = self._get_instances_set_log_context(instances_set)
-
-        return status.log_context
-
-    def _get_patient_id(self, instances_set: InstancesSet) -> str:
-        try:
-            study_id = self._get_study_id(instances_set)
-            if not study_id:
-                return UNKNOWN_LOG_CONTEXT_VALUE
-
-            study = self._source.studies.get(study_id)
-            patient_tags = getattr(study, 'patient_main_dicom_tags', None)
-            if patient_tags is None and isinstance(study, dict):
-                patient_tags = study.get('PatientMainDicomTags')
-
-            if not patient_tags:
-                return UNKNOWN_LOG_CONTEXT_VALUE
-
-            return patient_tags.get('PatientID') or UNKNOWN_LOG_CONTEXT_VALUE
-        except Exception as ex:
-            logger.debug(f"{instances_set} Could not resolve PatientID for logs: {ex}")
-            return UNKNOWN_LOG_CONTEXT_VALUE
-
-    def _get_sender_aet(self, instances_set: InstancesSet) -> str:
-        if len(instances_set.instances_ids) == 0:
-            return UNKNOWN_LOG_CONTEXT_VALUE
-
-        instance_id = instances_set.instances_ids[0]
-        for metadata_name in REMOTE_AET_METADATA_NAMES:
-            try:
-                sender_aet = self._source.instances.get_string_metadata(
-                    instance_id,
-                    metadata_name=metadata_name,
-                    default_value=None
-                )
-                if sender_aet:
-                    return sender_aet
-            except Exception as ex:
-                logger.debug(f"{instances_set} Could not resolve {metadata_name} for logs: {ex}")
-
-        return UNKNOWN_LOG_CONTEXT_VALUE
 
     def _get_study_id(self, instances_set: InstancesSet) -> Optional[str]:
         study_id = getattr(instances_set, 'study_id', None)

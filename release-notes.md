@@ -1,17 +1,8 @@
 Pending changes
 ===============
-- `OrthancCloner`: added `--transfer_timeout` / `TRANSFER_TIMEOUT` for configurable download/upload timeouts (default: 300s).
-- `OrthancCloner`: improved error handling for connection errors and timeouts (logged, retried, and written to error folder).
-- `OrthancForwarder`: added multi-destination support with per-destination mode override (`alias:mode` syntax).
-- `OrthancForwarder`: added `DESTINATIONS` env var for comma-separated destination list.
-- `OrthancForwarder`: added optional per-destination `StudyDescription` filters via `substring` or `regex` matching.
-- `OrthancForwarder`: `StableStudy` now waits until Orthanc reports the study as stable before forwarding or deleting source data.
-- `OrthancFolderImporter`: added `--skip_extensions` / `SKIP_EXTENSIONS` to ignore files by extension.
-- `OrthancFolderImporter`: worker threads now pause and resume automatically when Orthanc is unreachable.
-- `OrthancFolderImporter`: added retry-idempotent attachment of one PDF report to a validated single-study import unit.
-- `OrthancMonitor`: fixed logger formatting error in exception handler.
-- `Scheduler`: fixed optional schedule parsing, inclusive weekday ranges, the default timezone, and Python 3.8 compatibility.
-- Simplified Dockerfile with `.dockerignore` for smaller build context.
+- `OrthancForwarder`: added multi-destination forwarding with optional per-destination modes.
+- `OrthancForwarder`: added case-insensitive `StudyDescription` substring and regex filters per destination.
+- `OrthancForwarder`: stable-study processing, retry state, terminal routing state, and heartbeat handling now support long-running filtered workflows.
 
 v 0.21.2
 ========

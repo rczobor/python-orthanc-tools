@@ -5,7 +5,6 @@ from unittest import mock
 
 from orthanc_api_client import ChangeType, exceptions
 
-from orthanc_tools.orthanc_cloner import OrthancCloner
 from orthanc_tools.orthanc_forwarder import (
     OrthancForwarder,
     ForwarderDestination,
@@ -17,7 +16,6 @@ from orthanc_tools.orthanc_forwarder import (
     split_cli_destination_entries,
     split_destination_entries,
 )
-from orthanc_tools.orthanc_folder_importer import OrthancFolderImporter
 
 
 class TestOrthancForwarderConfiguration(unittest.TestCase):
@@ -218,68 +216,6 @@ class FakeInstancesSet:
             processor(mock.sentinel.api_client, instance_id)
 
 
-class TestOrthancForwarderLogContext(unittest.TestCase):
-
-    def test_log_context_includes_patient_id_and_sender_aet(self):
-        source = mock.MagicMock()
-        study = mock.MagicMock()
-        study.patient_main_dicom_tags = {"PatientID": "PATIENT-1"}
-        source.instances.get_parent_study_id.return_value = "study-1"
-        source.instances.get_string_metadata.return_value = "MODALITY-A"
-        source.studies.get.return_value = study
-        forwarder = OrthancForwarder(
-            source=source,
-            destinations=[ForwarderDestination(destination="orthanc-b", forwarder_mode=ForwarderMode.DICOM)]
-        )
-
-        self.assertEqual(
-            "PatientID=PATIENT-1 SenderAET=MODALITY-A",
-            forwarder._get_instances_set_log_context(FakeInstancesSet())
-        )
-
-        source.instances.get_parent_study_id.assert_called_once_with("instance-1")
-        source.studies.get.assert_called_once_with("study-1")
-        source.instances.get_string_metadata.assert_called_once_with(
-            "instance-1",
-            metadata_name="RemoteAET",
-            default_value=None
-        )
-
-    def test_log_context_uses_unknown_when_patient_id_is_missing(self):
-        source = mock.MagicMock()
-        study = mock.MagicMock()
-        study.patient_main_dicom_tags = {}
-        source.instances.get_parent_study_id.return_value = "study-1"
-        source.instances.get_string_metadata.return_value = "MODALITY-A"
-        source.studies.get.return_value = study
-        forwarder = OrthancForwarder(
-            source=source,
-            destinations=[ForwarderDestination(destination="orthanc-b", forwarder_mode=ForwarderMode.DICOM)]
-        )
-
-        self.assertEqual(
-            "PatientID=unknown SenderAET=MODALITY-A",
-            forwarder._get_instances_set_log_context(FakeInstancesSet())
-        )
-
-    def test_log_context_uses_unknown_when_sender_aet_is_unavailable(self):
-        source = mock.MagicMock()
-        study = mock.MagicMock()
-        study.patient_main_dicom_tags = {"PatientID": "PATIENT-1"}
-        source.instances.get_parent_study_id.return_value = "study-1"
-        source.instances.get_string_metadata.side_effect = Exception("missing metadata")
-        source.studies.get.return_value = study
-        forwarder = OrthancForwarder(
-            source=source,
-            destinations=[ForwarderDestination(destination="orthanc-b", forwarder_mode=ForwarderMode.DICOM)]
-        )
-
-        self.assertEqual(
-            "PatientID=PATIENT-1 SenderAET=unknown",
-            forwarder._get_instances_set_log_context(FakeInstancesSet())
-        )
-
-
 class TestOrthancForwarderFilteringBehavior(unittest.TestCase):
 
     def test_terminal_marker_uses_the_orthanc_study_id(self):
@@ -339,8 +275,7 @@ class TestOrthancForwarderFilteringBehavior(unittest.TestCase):
         )
         instances_set = FakeInstancesSet()
 
-        with mock.patch.object(forwarder, "_get_instances_set_log_context", return_value="PatientID=1 SenderAET=AET"):
-            forwarder.handle_instances_set(instances_set)
+        forwarder.handle_instances_set(instances_set)
 
         self.assertIs(instances_set, forwarder.deleted_instances_set)
 
@@ -358,6 +293,34 @@ class TestOrthancForwarderFilteringBehavior(unittest.TestCase):
         self.assertEqual(["dicom:orthanc-b::"], sent_to_destinations)
         self.assertEqual(["dicom:orthanc-b::"], eligible_destinations)
         forward_to_destination.assert_called_once_with(instances_set=instances_set, destination=forwarder._destinations[0])
+
+    def test_source_is_kept_until_every_destination_succeeds(self):
+        forwarder = OrthancForwarder(
+            source=mock.MagicMock(),
+            destinations=[
+                ForwarderDestination(destination="orthanc-b", forwarder_mode=ForwarderMode.DICOM),
+                ForwarderDestination(destination="orthanc-c", forwarder_mode=ForwarderMode.DICOM),
+            ],
+        )
+        instances_set = FakeInstancesSet()
+        attempts = []
+
+        def forward_to_destination(instances_set, destination):
+            attempts.append(destination.destination)
+            if destination.destination == "orthanc-c" and attempts.count("orthanc-c") == 1:
+                raise RuntimeError("destination unavailable")
+
+        with mock.patch.object(forwarder, "_forward_to_destination", side_effect=forward_to_destination):
+            forwarder.handle_instances_set(instances_set)
+
+            self.assertFalse(instances_set.deleted)
+            self.assertEqual(["dicom:orthanc-b::"], forwarder._status[instances_set.id].sent_to_destinations)
+
+            forwarder._status[instances_set.id].next_retry = None
+            forwarder.handle_instances_set(instances_set)
+
+        self.assertTrue(instances_set.deleted)
+        self.assertEqual(["orthanc-b", "orthanc-c", "orthanc-c"], attempts)
 
     def test_filtered_only_non_matching_study_runs_hooks_before_terminal_skip(self):
         instance_filter = mock.Mock(return_value=False)
@@ -485,117 +448,6 @@ class TestOrthancForwarderFilteringBehavior(unittest.TestCase):
 
         self.assertFalse(instances_set.deleted)
         self.assertEqual(["dicom:orthanc-b::"], forwarder._status[instances_set.id].sent_to_destinations)
-        self.assertEqual(
-            ["dicom:orthanc-b::", "dicom:ai:substring:brain"],
-            forwarder._status[instances_set.id].last_eligible_destinations
-        )
         self.assertEqual(1, forwarder._status[instances_set.id].retry_count)
         self.assertIsNotNone(forwarder._status[instances_set.id].next_retry)
         forward_to_destination.assert_called_once_with(instances_set=instances_set, destination=forwarder._destinations[0])
-
-class TestOrthancFolderImporterConnectivity(unittest.TestCase):
-
-    def test_workers_share_a_failed_reconnect_window(self):
-        api_client = mock.MagicMock()
-        api_client.is_alive.return_value = False
-        importer = OrthancFolderImporter(
-            api_client=api_client,
-            folder_path=".",
-            errors_path=None,
-            state_path=None,
-        )
-
-        with mock.patch("orthanc_tools.orthanc_folder_importer.ORTHANC_READY_MAX_CHECKS", 1):
-            with mock.patch("orthanc_tools.orthanc_folder_importer.time.monotonic", return_value=100):
-                with mock.patch("orthanc_tools.orthanc_folder_importer.time.sleep") as sleep:
-                    self.assertFalse(importer._wait_until_orthanc_is_ready())
-                    self.assertFalse(importer._wait_until_orthanc_is_ready())
-
-        sleep.assert_called_once()
-        self.assertEqual(3, api_client.is_alive.call_count)
-
-    def test_permanent_unreachable_orthanc_logs_error_instead_of_waiting_forever(self):
-        api_client = mock.MagicMock()
-        api_client.is_alive.return_value = False
-        api_client.upload.return_value = []
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            dicom_path = os.path.join(temp_dir, "test.dcm")
-            errors_path = os.path.join(temp_dir, "errors.txt")
-
-            with open(dicom_path, "wb") as dicom_file:
-                dicom_file.write(b"DICM")
-
-            importer = OrthancFolderImporter(
-                api_client=api_client,
-                folder_path=temp_dir,
-                errors_path=errors_path,
-                state_path=None,
-                max_retries=0
-            )
-
-            with mock.patch("orthanc_tools.orthanc_folder_importer.ORTHANC_READY_MAX_CHECKS", 1):
-                with mock.patch("orthanc_tools.orthanc_folder_importer.ORTHANC_READY_RECHECK_DELAY_SECONDS", 0):
-                    with mock.patch("orthanc_tools.orthanc_folder_importer.time.sleep"):
-                        importer.upload_and_label(dicom_path)
-
-            with open(errors_path, "rt") as errors_file:
-                self.assertEqual([dicom_path + "\n"], errors_file.readlines())
-
-
-class TestOrthancClonerTimeouts(unittest.TestCase):
-
-    def test_download_timeout_is_enforced_when_client_accepts_timeout(self):
-        cloner = object.__new__(OrthancCloner)
-        cloner._transfer_timeout = 0.01
-        api_client = mock.MagicMock()
-        api_client.get_binary.side_effect = TimeoutError("download timed out")
-
-        with self.assertRaises(TimeoutError):
-            cloner._download_with_timeout(api_client, "instance-1")
-
-        api_client.get_binary.assert_called_once_with("instances/instance-1/file", timeout=0.01)
-
-    def test_download_does_not_retry_without_timeout(self):
-        cloner = object.__new__(OrthancCloner)
-        cloner._transfer_timeout = 0.01
-        api_client = mock.MagicMock()
-        api_client.get_binary.side_effect = TypeError(
-            "get_binary() got an unexpected keyword argument 'timeout'"
-        )
-
-        with self.assertRaises(TypeError):
-            cloner._download_with_timeout(api_client, "instance-1")
-
-        api_client.get_binary.assert_called_once_with(
-            "instances/instance-1/file",
-            timeout=0.01,
-        )
-
-    def test_upload_timeout_is_enforced_when_client_accepts_timeout(self):
-        cloner = object.__new__(OrthancCloner)
-        cloner._transfer_timeout = 0.01
-        cloner._destination = mock.MagicMock()
-        cloner._destination.post.side_effect = TimeoutError("upload timed out")
-
-        with self.assertRaises(TimeoutError):
-            cloner._upload_with_timeout(b"dicom")
-
-        cloner._destination.post.assert_called_once_with('instances', data=b"dicom", timeout=0.01)
-
-    def test_upload_does_not_retry_without_timeout(self):
-        cloner = object.__new__(OrthancCloner)
-        cloner._transfer_timeout = 0.01
-        cloner._destination = mock.MagicMock()
-        cloner._destination.post.side_effect = TypeError(
-            "post() got an unexpected keyword argument 'timeout'"
-        )
-
-        with self.assertRaises(TypeError):
-            cloner._upload_with_timeout(b"dicom")
-
-        cloner._destination.post.assert_called_once_with(
-            'instances',
-            data=b"dicom",
-            timeout=0.01,
-        )

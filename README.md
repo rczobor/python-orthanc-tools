@@ -10,8 +10,6 @@ Functionalities are very limited now !  Backward compat will break a lot in the 
 pip3 install orthanc-tools
 ```
 
-Docker images in examples should use the package version you deploy. In this checkout, the package version is `0.21.2`. In the parent `/docker` repository, production stacks build this submodule as the local image `python-orthanc-tools:local`.
-
 
 ## cloning an Orthanc to another
 
@@ -46,7 +44,7 @@ or, inside a docker-compose file:
 ```yaml
 services:
     orthanc-cloner:
-        image: orthancteam/python-orthanc-tools:0.21.2
+        image: orthancteam/python-orthanc-tools:0.19.1
         volumes: ["orthanc-cloner:/status"]
         environment:
             TZ: "Etc/UTC"
@@ -63,15 +61,11 @@ services:
 #            VERBOSE_ENABLED: "true"
             ERROR_FOLDER_PATH: "/status"
             MAX_RETRIES: "3"
-            TRANSFER_TIMEOUT: "300"  # timeout in seconds for download/upload operations
         entrypoint: python -m orthanc_tools.orthanc_cloner
 volumes:
     orthanc-cloner:  
 
 ```
-
-`TRANSFER_TIMEOUT` / `--transfer_timeout` applies to Default-mode instance download/upload calls.
-Peer, transfer-plugin, and DICOM modes use the corresponding Orthanc operation behavior.
 
 ### OrthancCloner performance
 
@@ -102,73 +96,55 @@ $ docker exec -it xxxx bash
 
 ```
 
-The `--skip_extensions` flag (or `SKIP_EXTENSIONS` env var) accepts a comma-separated list of file
-extensions to ignore during import (e.g. `.cne,.bmp,.ini`).
-
-The importer is resilient to short Orthanc restarts: if a connection is lost, all worker threads pause
-for a bounded reconnect window and resume once Orthanc is reachable again. If Orthanc stays unreachable
-after that window, the current upload attempt is treated as failed and follows the normal retry/error-log flow.
-
-For importer error logging, use `ERRORS_PATH` to point to a log file. If you set
-`ERROR_FOLDER_PATH`, the importer writes to `errors.txt` inside that folder.
-
 
 ## Implement a simple forwarder
 
-The forwarder simply forwards the content of an Orthanc to another DICOM destination and then, deletes
-the instances.  This is usefull for, e.g. implementing an Inbox in front of a PACS that does some
+The forwarder forwards the content of an Orthanc to one or more destinations and then deletes
+the source instances after every eligible destination has succeeded. This is useful for, e.g. implementing an Inbox in front of a PACS that does some
 `IngestTranscoding` and/or applies sanitization in a lua script or a python plugin.
 
-When using `--trigger=StableStudy`, the forwarder only handles studies after Orthanc reports them as
-stable. Configure Orthanc's `StableAge` on the source Orthanc to control how long Orthanc waits after
-the last received instance before a study is considered complete. For example, `StableAge: 60` waits
-about one minute after the last incoming instance before forwarding can start.
+When using `--trigger=StableStudy`, forwarding starts only after Orthanc reports a study as stable.
+Set `StableAge` on the source Orthanc to control how long it waits after the last received instance.
 
-from a shell (single destination):
+From a shell, for one destination:
 
 ```shell
 python3 -m orthanc_tools.orthanc_forwarder --source_url=http://192.168.0.10:8042 --source_user=user --source_pwd=pwd --destination=target_modality_alias --trigger=StableStudy
 ```
 
-### Multiple destinations
-
-You can forward to multiple destinations at once. Each destination can optionally override the default mode
-using the `alias:mode` syntax. With the CLI, you can pass one `--destination` flag per destination or
-comma-separate multiple destinations in one flag:
+Repeat `--destination`, or use a comma-separated `DESTINATIONS` environment variable, to forward to
+multiple destinations. Each entry accepts an optional mode and a case-insensitive `StudyDescription`
+filter:
 
 ```shell
-# Forward to two DICOM destinations
-python3 -m orthanc_tools.orthanc_forwarder --source_url=http://localhost:8042 --destination=modality_a --destination=modality_b --trigger=StableStudy
-
-# Forward to one peer and one DICOM destination with different modes
-python3 -m orthanc_tools.orthanc_forwarder --source_url=http://localhost:8042 --destination=peer_a:peering --destination=modality_b:dicom --trigger=StableStudy
-
-# Equivalent comma-separated form
-python3 -m orthanc_tools.orthanc_forwarder --source_url=http://localhost:8042 --destination=peer_a:peering,modality_b:dicom --trigger=StableStudy
-
-# Forward everything to two destinations, plus only AI-tagged studies to a third one
-python3 -m orthanc_tools.orthanc_forwarder --source_url=http://localhost:8042 --destination=peer_a:peering --destination=modality_b:dicom --destination=ai_service:dicom:substring:AI --trigger=StableStudy
+python3 -m orthanc_tools.orthanc_forwarder \
+  --source_url=http://localhost:8042 \
+  --destination=archive:dicom \
+  --destination=rtg:dicom:substring:RTG \
+  --destination='ai:dicom:regex:^AI[ _-]' \
+  --trigger=StableStudy
 ```
 
-Using environment variables (useful in docker-compose):
+The entry format is `alias[:mode[:substring|regex:pattern]]`. An empty mode uses the global `MODE`,
+for example `rtg::substring:RTG`. Quote an entry if its pattern contains a comma. A missing
+`StudyDescription` does not match a filtered destination.
 
-- `DESTINATION`: single destination alias (backward compatible)
-- `DESTINATIONS`: comma-separated list of destinations with optional mode overrides and Study Description filters (e.g. `peer_a:peering,modality_b:dicom,ai_service:dicom:regex:^AI[ _-]`)
-- `MODE`: default forwarding mode when no per-destination override is specified
+For Docker Compose, the equivalent configuration is:
 
-Study Description filters are evaluated per study and are case-insensitive:
+```yaml
+environment:
+  SOURCE_URL: http://orthanc:8042
+  DESTINATIONS: archive:dicom,rtg:dicom:substring:RTG
+  TRIGGER: StableStudy
+  HEARTBEAT_FILE: /tmp/forwarder-heartbeat
+```
 
-- `alias:mode:substring:pattern`: forward only if `StudyDescription` contains `pattern`
-- `alias:mode:regex:pattern`: forward only if `StudyDescription` matches the regex
-- `alias::substring:pattern`: use the global `MODE` with a Study Description filter
+`DESTINATION` remains supported for a single destination. `MODE` sets the default mode. When
+`HEARTBEAT_FILE` is set, the forwarder periodically touches that file for a container health check.
 
-If a filter pattern contains commas in `DESTINATIONS`, wrap that destination entry in double quotes, for example:
-`DESTINATIONS='peer_a:peering,"ai_service:dicom:substring:CT, ABDOMEN"'`
-
-The same quoting rule applies when comma-separating multiple destinations in one CLI flag.
-
-If a study has no `StudyDescription`, filtered destinations are skipped while unfiltered destinations still receive the study.
-If no destination is eligible after filtering, the source data is kept and marked terminal so it is not retried forever.
+If no configured destination matches a study, the source data is retained. The skip is persisted in
+Orthanc metadata to avoid an endless retry loop and is reconsidered when the study or routing
+configuration changes.
 
 
 ## migrate DICOM Data from a modality to another
@@ -222,7 +198,7 @@ python3 -m orthanc_tools.orthanc_cleaner --url=http://localhost:8042 --user=orth
 ## Deploy an HL7 server parsing ORM^O01 messages to create and store worklists files in a folder
 ```
    hl7-server:
-        image: orthancteam/python-orthanc-tools:0.21.2
+        image: orthancteam/python-orthanc-tools:0.10.0
         ports: ["2575:2575"]
         volumes: ["/worklists:/worklists"]
         restart: unless-stopped
