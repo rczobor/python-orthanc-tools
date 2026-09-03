@@ -3,7 +3,7 @@
 This script will check that every single instance of an Orthanc has actually a file in the storage location.
 It will ouput a csv file with the following information:
 
-PatientID,PatientName,StudyDate,StudyDescription,StudyInstanceUID,MissingInstanceID
+PatientID,PatientName,StudyDate,StudyDescription,StudyInstanceUID,MissingFilePath
 
 The script will get the list of all studies.
 For each study:
@@ -20,21 +20,10 @@ import argparse
 import logging
 from typing import List
 import os
-from orthanc_api_client import OrthancApiClient, exceptions, helpers
+from orthanc_api_client import OrthancApiClient, helpers
 import csv
 
 logger = logging.getLogger(__name__)
-MISSING_STORAGE_ORTHANC_STATUS = 2006
-
-
-def is_missing_storage_file_error(error: exceptions.HttpError) -> bool:
-    if error.http_status_code != 500 or error.request_response is None:
-        return False
-
-    try:
-        return error.request_response.json().get("OrthancStatus") == MISSING_STORAGE_ORTHANC_STATUS
-    except (AttributeError, TypeError, ValueError):
-        return False
 
 class OrthancFilesChecker:
 
@@ -64,18 +53,14 @@ class OrthancFilesChecker:
             # for each instance
             for instance_id in instances_ids:
                 try:
-                    self._api_client.post(
-                        f"instances/{instance_id}/attachments/dicom/verify-md5"
-                    )
-                except exceptions.HttpError as ex:
-                    if not is_missing_storage_file_error(ex):
-                        raise
+                    self._api_client.instances.get_file(instance_id)
+                except:
                     study = self._api_client.studies.get(orthanc_id=study_id)
-                    self.add_study_to_list(study, instance_id)
+                    self.add_study_to_list(study)
                     break
 
 
-    def add_study_to_list(self, study, missing_instance_id):
+    def add_study_to_list(self, study):
         '''
         add a line to the file with the study_info
         '''
@@ -86,15 +71,8 @@ class OrthancFilesChecker:
         StudyDescription = study.main_dicom_tags.get("StudyDescription")
         StudyInstanceUID = study.main_dicom_tags.get("StudyInstanceUID")
 
-        with open(self._missing_files_list_file_path, "a", newline="") as f:
-            csv.writer(f).writerow([
-                PatientID,
-                PatientName,
-                StudyDate,
-                StudyDescription,
-                StudyInstanceUID,
-                missing_instance_id,
-            ])
+        with open(self._missing_files_list_file_path, "a") as f:
+            f.write(f'{PatientID},{PatientName},{StudyDate},{StudyDescription},{StudyInstanceUID}\n')
 
 
     def execute(self):

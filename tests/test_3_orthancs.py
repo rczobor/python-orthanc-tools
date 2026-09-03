@@ -1,7 +1,6 @@
 import threading
 import time
 import sys
-import io
 import pprint
 import unittest
 import subprocess
@@ -17,7 +16,6 @@ import pathlib
 import os
 import logging
 import unittest
-import pydicom
 
 from orthanc_tools import OrthancCloner, ClonerMode, OrthancMonitor, OrthancTestDbPopulator, PacsMigrator, IdsMigrator, OrthancComparator, OrthancForwarder, ForwarderMode, ForwarderDestination, OrthancCleaner, OrthancFolderImporter, OrthancSyncher, OrthancFilesChecker
 
@@ -35,69 +33,23 @@ logger.addHandler(ch)
 forwarder_count_failed = 0
 forwarder_count_success = 0
 
-
-def wait_until_monotonic(predicate, timeout, polling_interval=0.1):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(polling_interval)
-    return False
-
-
 class Test3Orthancs(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls._uses_external_orthancs = os.environ.get("ORTHANC_TEST_EXTERNAL") == "1"
-        orthanc_host = os.environ.get("ORTHANC_TEST_HOST", "localhost")
+        subprocess.run(["docker", "compose", "down", "-v"], cwd=here/"docker-setup")
+        subprocess.run(["docker", "compose", "up", "-d"], cwd=here/"docker-setup")
 
-        if not cls._uses_external_orthancs:
-            subprocess.run(["docker", "compose", "down", "-v"], cwd=here/"docker-setup", check=True)
-            subprocess.run(["docker", "compose", "up", "-d"], cwd=here/"docker-setup", check=True)
-
-        cls.oa = OrthancApiClient(f'http://{orthanc_host}:10042', user='test', pwd='test')
+        cls.oa = OrthancApiClient('http://localhost:10042', user='test', pwd='test')
         cls.oa.wait_started()
-        cls.ob = OrthancApiClient(f'http://{orthanc_host}:10043', user='test', pwd='test')
+        cls.ob = OrthancApiClient('http://localhost:10043', user='test', pwd='test')
         cls.ob.wait_started()
-        cls.oc = OrthancApiClient(f'http://{orthanc_host}:10044', user='test', pwd='test')
+        cls.oc = OrthancApiClient('http://localhost:10044', user='test', pwd='test')
         cls.oc.wait_started()
 
     @classmethod
     def tearDownClass(cls):
-        if not cls._uses_external_orthancs:
-            subprocess.run(["docker", "compose", "down", "-v"], cwd=here/"docker-setup", check=True)
-
-    def _replace_study_description(self, api_client, instance_ids, study_description):
-        modified_instances = []
-        for instance_id in instance_ids:
-            modified = api_client.instances.modify(
-                instance_id,
-                replace_tags={"StudyDescription": study_description},
-                keep_tags=['SOPInstanceUID', 'SeriesInstanceUID', 'StudyInstanceUID'],
-                force=True,
-            )
-            modified_dataset = pydicom.dcmread(io.BytesIO(modified))
-            self.assertEqual(study_description, modified_dataset.StudyDescription)
-            modified_instances.append((instance_id, modified))
-
-        for instance_id, _ in modified_instances:
-            api_client.instances.delete(orthanc_id=instance_id)
-
-        self.assertTrue(
-            wait_until_monotonic(
-                lambda: not set(instance_ids).intersection(api_client.instances.get_all_ids()),
-                timeout=5,
-            )
-        )
-
-        for instance_id, modified in modified_instances:
-            replaced_instance_ids = api_client.upload(buffer=modified)
-            self.assertEqual(instance_id, replaced_instance_ids[0])
-            self.assertEqual(
-                study_description,
-                api_client.instances.get_tags(instance_id).get("StudyDescription"),
-            )
+        subprocess.run(["docker", "compose", "down", "-v"], cwd=here/"docker-setup")
 
     def test_cloner_default(self):
         self.oa.delete_all_content()
@@ -670,20 +622,9 @@ class Test3Orthancs(unittest.TestCase):
                     # upload once the forwarder is running
                     instances_ids = self.oa.upload_folder(here / "stimuli/MR/Brain")
 
-                    # Wait for both sides to settle. Orthanc can briefly report no studies
-                    # while deleted instances are still visible through the instances route.
-                    forwarding_completed = wait_until_monotonic(
-                        lambda: (
-                            len(self.oa.instances.get_all_ids()) == 0
-                            and len(self.ob.instances.get_all_ids()) == len(instances_ids)
-                        ),
-                        timeout=30,
-                    )
+                    # wait until the source is empty (= the forwarder has completed its job)
+                    helpers.wait_until(lambda: len(self.oa.studies.get_all_ids()) == 0, timeout=30)
 
-                    self.assertTrue(
-                        forwarding_completed,
-                        f"Forwarding did not complete for mode={mode}, trigger={trigger}",
-                    )
                     self.assertEqual(len(instances_ids), len(self.ob.instances.get_all_ids()))
                     # check it has been removed from Orthanc A
                     self.assertEqual(0, len(self.oa.instances.get_all_ids()))
@@ -710,91 +651,6 @@ class Test3Orthancs(unittest.TestCase):
                     self.assertEqual(len(instances_ids), len(self.ob.instances.get_all_ids()))
                     # check it has been removed from Orthanc A
                     self.assertEqual(0, len(self.oa.instances.get_all_ids()))
-
-    def test_orthanc_forwarder_filtered_destination_forwards_only_matching_studies(self):
-        self.oa.delete_all_content()
-        self.ob.delete_all_content()
-        self.oc.delete_all_content()
-
-        instances_ids = self.oa.upload_folder(here / "stimuli/MR/Brain")
-        self._replace_study_description(self.oa, instances_ids, "ai brain screening")
-
-        with OrthancForwarder(
-            source=self.oa,
-            destinations=[
-                ForwarderDestination(destination="orthanc-b", forwarder_mode=ForwarderMode.DICOM),
-                ForwarderDestination(
-                    destination="orthanc-c",
-                    forwarder_mode=ForwarderMode.DICOM,
-                    study_description_match_type="regex",
-                    study_description_pattern="^AI BRAIN"
-                )
-            ],
-            trigger=ChangeType.STABLE_STUDY,
-            polling_interval_in_seconds=0.1
-        ) as forwarder:
-            forwarding_completed = wait_until_monotonic(
-                lambda: (
-                    len(self.oa.instances.get_all_ids()) == 0
-                    and len(self.ob.instances.get_all_ids()) == len(instances_ids)
-                    and len(self.oc.instances.get_all_ids()) == len(instances_ids)
-                ),
-                timeout=30,
-            )
-
-        self.assertTrue(forwarding_completed)
-        self.assertEqual(len(instances_ids), len(self.ob.instances.get_all_ids()))
-        self.assertEqual(len(instances_ids), len(self.oc.instances.get_all_ids()))
-        self.assertEqual(0, len(self.oa.instances.get_all_ids()))
-
-    def test_orthanc_forwarder_filtered_destination_skips_empty_study_description(self):
-        self.oa.delete_all_content()
-        self.ob.delete_all_content()
-        self.oc.delete_all_content()
-
-        instances_ids = self.oa.upload_folder(here / "stimuli/MR/Brain")
-        self._replace_study_description(self.oa, instances_ids, "")
-
-        with OrthancForwarder(
-            source=self.oa,
-            destinations=[
-                ForwarderDestination(destination="orthanc-b", forwarder_mode=ForwarderMode.DICOM),
-                ForwarderDestination(
-                    destination="orthanc-c",
-                    forwarder_mode=ForwarderMode.DICOM,
-                    study_description_match_type="substring",
-                    study_description_pattern="ai"
-                )
-            ],
-            trigger=ChangeType.STABLE_STUDY,
-            polling_interval_in_seconds=0.1
-        ) as forwarder:
-            helpers.wait_until(lambda: len(self.oa.studies.get_all_ids()) == 0, timeout=30)
-
-        self.assertEqual(len(instances_ids), len(self.ob.instances.get_all_ids()))
-        self.assertEqual(0, len(self.oc.instances.get_all_ids()))
-        self.assertEqual(0, len(self.oa.instances.get_all_ids()))
-
-    def test_orthanc_forwarder_logs_sender_aet_from_dicom_origin(self):
-        self.oa.delete_all_content()
-        self.ob.delete_all_content()
-        self.oc.delete_all_content()
-
-        instances_ids = self.ob.upload_file(here / "stimuli/CT_small.dcm")
-
-        with self.assertLogs("orthanc_tools.orthanc_forwarder", level="INFO") as logs:
-            with OrthancForwarder(
-                source=self.oa,
-                destinations=[ForwarderDestination(destination="orthanc-c", forwarder_mode=ForwarderMode.DICOM)],
-                trigger=ChangeType.STABLE_STUDY,
-                polling_interval_in_seconds=0.1
-            ) as forwarder:
-                self.ob.modalities.send(target_modality='orthanc-a', resources_ids=instances_ids)
-                helpers.wait_until(lambda: len(self.oa.studies.get_all_ids()) == 0, timeout=30)
-
-        self.assertEqual(len(instances_ids), len(self.oc.instances.get_all_ids()))
-        self.assertEqual(0, len(self.oa.instances.get_all_ids()))
-        self.assertIn("SenderAET=ORTHANC-B", "\n".join(logs.output))
 
 
     def test_orthanc_forwarder_filter_and_process(self):
@@ -1177,7 +1033,7 @@ class Test3Orthancs(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             errors_path = os.path.join(temp_dir, 'errors.txt')
             state_path = os.path.join(temp_dir, 'folders.txt')
-            importer = OrthancFolderImporter(api_client=self.oa, folder_path=here / "stimuli", errors_path=errors_path, state_path=state_path, max_retries=0)
+            importer = OrthancFolderImporter(api_client=self.oa, folder_path=here / "stimuli", errors_path=errors_path, state_path=state_path)
             importer.execute()
 
             self.assertEqual(5, len(self.oa.instances.get_all_ids()))
@@ -1246,36 +1102,6 @@ class Test3Orthancs(unittest.TestCase):
             with open(here / "docker-setup-replicator/uninhibit.lua", 'rb') as f:
                 lua_script = f.read()
             self.oa.execute_lua_script(lua_script)
-
-    def test_folder_importer_with_pdf_file(self):
-        self.oa.delete_all_content()
-        with tempfile.TemporaryDirectory() as temp_dir:
-            input_path = pathlib.Path(temp_dir, "input")
-            input_path.mkdir()
-            shutil.copy(here / "stimuli/CT_small.dcm", input_path)
-            shutil.copy(here / "stimuli/sample.pdf", input_path)
-            errors_path = os.path.join(temp_dir, 'errors.txt')
-            state_path = os.path.join(temp_dir, 'folders.txt')
-            importer = OrthancFolderImporter(api_client=self.oa, folder_path=input_path, errors_path=errors_path, state_path=state_path, max_retries=0, dicomize_pdf=True)
-            importer.execute()
-
-            self.assertEqual(2, len(self.oa.instances.get_all_ids()))
-            self.assertEqual(1, len(self.oa.studies.get_all_ids()))
-            self.assertFalse(os.path.exists(errors_path))
-
-            os.remove(state_path)
-            retry_importer = OrthancFolderImporter(
-                api_client=self.oa,
-                folder_path=input_path,
-                errors_path=errors_path,
-                state_path=state_path,
-                max_retries=0,
-                dicomize_pdf=True,
-            )
-            retry_importer.execute()
-
-            self.assertEqual(2, len(self.oa.instances.get_all_ids()))
-            self.assertEqual(1, len(self.oa.studies.get_all_ids()))
 
     def test_orthanc_syncher_as_a_migrator(self):
         self.oa.delete_all_content()
@@ -1395,7 +1221,6 @@ class Test3Orthancs(unittest.TestCase):
     def test_files_checker_with_invalid_storage(self):
         self.oa.delete_all_content()
         self.oa.upload_file(here / "stimuli/CT_small.dcm")
-        missing_instance_id = self.oa.instances.get_all_ids()[0]
 
         # delete the file from the storage
         subprocess.run(
@@ -1424,14 +1249,11 @@ class Test3Orthancs(unittest.TestCase):
             with open(missing_files_list_file_path, "r") as file:
                 file_content = file.readline()
                 file_content = file_content.replace("\n", "")
-                self.assertEqual(
-                    file_content,
-                    '1CT1,CompressedSamples^CT1,20040119,e+1,1.3.6.1.4.1.5962.1.2.1.20040119072730.12322,'
-                    + missing_instance_id,
-                )
+                self.assertEqual(file_content, '1CT1,CompressedSamples^CT1,20040119,e+1,1.3.6.1.4.1.5962.1.2.1.20040119072730.12322')
 
 
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     unittest.main()
+

@@ -2,6 +2,7 @@ import typing
 import time
 import glob
 import os
+from .time_out import TimeOut
 import threading
 import logging
 
@@ -28,7 +29,6 @@ class OldFilesDeleter:
         self._recursive = recursive
         self._thread = None
         self._execution_count = 0 # mainly used in unit tests
-        self._stop_event = threading.Event()
 
     def execute_once(self):
         self._execution_count += 1
@@ -41,9 +41,6 @@ class OldFilesDeleter:
             glob_filter = os.path.join(self._folder_to_monitor, '**/', self._filter)
 
         for file_path in glob.glob(glob_filter, recursive = self._recursive):
-            if not os.path.isfile(file_path):
-                continue
-
             last_modification_time = os.path.getmtime(file_path)
             if last_modification_time < oldest_time:
                 logger.debug("deleting {file_path}".format(file_path = file_path))
@@ -54,14 +51,16 @@ class OldFilesDeleter:
 
     def execute(self):
         self._is_running = True
+        timeout = TimeOut(self._execution_interval)
 
         # execute once at startup and then every X
         self.execute_once()
 
-        while not self._stop_event.wait(self._execution_interval):
+        while self._is_running:
+            while self._is_running and not timeout.is_expired():
+                time.sleep(min(1, self._execution_interval))
             self.execute_once()
-
-        self._is_running = False
+            timeout.reset()
 
     def __enter__(self):
         self.start()
@@ -73,11 +72,6 @@ class OldFilesDeleter:
     def start(self):
         logger.info("Starting old files deleter ({folder})".format(folder = self._folder_to_monitor))
 
-        if self._thread is not None and self._thread.is_alive():
-            raise RuntimeError("Old files deleter is already running")
-
-        self._stop_event.clear()
-
         # create monitoring thread
         self._thread = threading.Thread(
             target = self.execute,
@@ -87,7 +81,5 @@ class OldFilesDeleter:
 
     def stop(self):
         logger.info("Stopping old files deleter ({folder})".format(folder = self._folder_to_monitor))
-        self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join()
-            self._thread = None
+        self._is_running = False
+        self._thread.join()

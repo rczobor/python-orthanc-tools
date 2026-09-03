@@ -223,8 +223,7 @@ class OrthancMonitor:
                         processed = True
 
                 except Exception as ex:
-                    # log the full stacktrace without triggering formatting errors
-                    logger.exception("Unhandled exception in event handler: %s", ex)
+                    logger.exception("Unhandled exception in event handler: ", ex)
                     last_error = str(ex)
 
                 retries = retries + 1
