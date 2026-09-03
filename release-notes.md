@@ -1,3 +1,9 @@
+Pending changes
+===============
+- `OrthancForwarder`: added multi-destination forwarding with optional per-destination modes.
+- `OrthancForwarder`: added case-insensitive `StudyDescription` substring and regex filters per destination.
+- `OrthancForwarder`: stable-study processing, retry state, terminal routing state, and heartbeat handling now support long-running filtered workflows.
+
 v 0.22.1
 ========
 - Added a way to avoid duplicates in the `DicomWorklistBuilder`

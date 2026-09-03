@@ -1,18 +1,26 @@
 import argparse
+import csv
 import datetime
+import hashlib
 import logging
 import time
 import os
+import re
 import threading
 import queue
+from collections import Counter
+from pathlib import Path
 from strenum import StrEnum
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
-from orthanc_api_client import OrthancApiClient, InstancesSet, ResourceType, exceptions
+from orthanc_api_client import OrthancApiClient, InstancesSet, ResourceType, ResourceNotFound, exceptions
 from .orthanc_monitor import ChangeType
 
 logger = logging.getLogger(__name__)
+HEARTBEAT_INTERVAL_SECONDS = 10
+TERMINAL_METADATA_NAME = "4600"
+
 
 class ForwarderMode(StrEnum):
     DICOM = 'dicom'             # use DICOM
@@ -23,11 +31,69 @@ class ForwarderMode(StrEnum):
     TRANSFER = 'transfer'       # use the transfer plugin accelerator between 2 orthancs
 
 
+class StudyDescriptionMatchType(StrEnum):
+    SUBSTRING = 'substring'
+    REGEX = 'regex'
+
+
 @dataclass
 class ForwarderDestination:
     destination: str                        # the alias of the destination Modality, Peer or DicomWeb server
     forwarder_mode: ForwarderMode           # the mode to use to forward to the destination
     alternate_destination: str = None       # an alternate destination in case this one can not be contacted
+    study_description_match_type: Optional[StudyDescriptionMatchType] = None
+    study_description_pattern: Optional[str] = None
+    _compiled_study_description_regex: Optional[re.Pattern] = field(init=False, default=None, repr=False)
+
+    def __post_init__(self):
+        if isinstance(self.study_description_match_type, str):
+            normalized_match_type = self.study_description_match_type.strip().lower()
+            valid_match_types = {m.value for m in StudyDescriptionMatchType}
+            if normalized_match_type not in valid_match_types:
+                raise ValueError(
+                    f"Invalid StudyDescription match type '{self.study_description_match_type}' "
+                    f"for destination '{self.destination}'. Allowed values: {sorted(valid_match_types)}"
+                )
+            self.study_description_match_type = StudyDescriptionMatchType(normalized_match_type)
+
+        if self.study_description_match_type is None:
+            self.study_description_pattern = None
+            return
+
+        if self.study_description_pattern is not None:
+            self.study_description_pattern = self.study_description_pattern.strip()
+
+        if not self.study_description_pattern:
+            raise ValueError(f"StudyDescription filter pattern is missing for destination '{self.destination}'.")
+
+        if self.study_description_match_type == StudyDescriptionMatchType.REGEX:
+            try:
+                self._compiled_study_description_regex = re.compile(self.study_description_pattern, re.IGNORECASE)
+            except re.error as ex:
+                raise ValueError(
+                    f"Invalid StudyDescription regex for destination '{self.destination}': {ex}"
+                ) from ex
+
+    @property
+    def retry_key(self) -> str:
+        match_type = self.study_description_match_type or ''
+        pattern = self.study_description_pattern or ''
+        return f"{self.forwarder_mode}:{self.destination}:{match_type}:{pattern}"
+
+    def matches_study_description(self, study_description: Optional[str]) -> bool:
+        if self.study_description_match_type is None:
+            return True
+
+        if not study_description:
+            return False
+
+        if self.study_description_match_type == StudyDescriptionMatchType.SUBSTRING:
+            return self.study_description_pattern.lower() in study_description.lower()
+
+        if self.study_description_match_type == StudyDescriptionMatchType.REGEX:
+            return self._compiled_study_description_regex.search(study_description) is not None
+
+        raise NotImplementedError(f"Unsupported StudyDescription match type: {self.study_description_match_type}")
 
 @dataclass
 class ResourceToForward:
@@ -99,6 +165,17 @@ class OrthancForwarder:
 
         self._source = source
         self._destinations = destinations
+        destination_retry_keys = [destination.retry_key for destination in destinations]
+        duplicate_retry_keys = sorted(
+            retry_key
+            for retry_key, count in Counter(destination_retry_keys).items()
+            if count > 1
+        )
+        if duplicate_retry_keys:
+            raise ValueError(
+                "Duplicate forwarder destinations are not allowed: "
+                + ", ".join(duplicate_retry_keys)
+            )
         self._trigger = trigger
         self._max_retry_count_at_startup = max_retry_count_at_startup
         self._polling_interval_in_seconds = polling_interval_in_seconds
@@ -109,6 +186,8 @@ class OrthancForwarder:
         self._on_instances_set_forwarded = on_instances_set_forwarded
         self._on_instances_set_forward_error = on_instances_set_forward_error
         self._status = {}
+        terminal_configuration = repr(sorted(destination_retry_keys)).encode("utf-8")
+        self._terminal_configuration = hashlib.sha256(terminal_configuration).hexdigest()
         self._resources_to_process = queue.Queue(worker_threads_count + 1)
         self._worker_threads_count = worker_threads_count
         self._worker_threads = []
@@ -134,10 +213,32 @@ class OrthancForwarder:
 
     def execute(self):  # runs forever !
         self.wait_orthanc_started()
+        heartbeat_file = os.environ.get("HEARTBEAT_FILE")
+        heartbeat_stop = None
+        heartbeat_thread = None
 
-        while True:
-            self.handle_all_content()
-            time.sleep(self._polling_interval_in_seconds)
+        if heartbeat_file:
+            heartbeat_stop = threading.Event()
+            heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                args=(heartbeat_file, heartbeat_stop),
+                name="OrthancForwarder heartbeat",
+            )
+            heartbeat_thread.start()
+
+        try:
+            while True:
+                self.handle_all_content()
+                time.sleep(self._polling_interval_in_seconds)
+        finally:
+            if heartbeat_stop:
+                heartbeat_stop.set()
+                heartbeat_thread.join()
+
+    def _heartbeat_loop(self, heartbeat_file, stop_event):
+        Path(heartbeat_file).touch()
+        while not stop_event.wait(HEARTBEAT_INTERVAL_SECONDS):
+            Path(heartbeat_file).touch()
 
     def _process_resources(self, worker_id):
         logger.debug(f"Starting Forwarder thread {worker_id}")
@@ -170,6 +271,20 @@ class OrthancForwarder:
         logger.debug(f"Stopping Forwarder thread {worker_id}")
 
     def handle_all_content(self):
+        # Fetch work before starting non-daemon threads. If the source API
+        # fails, the process can exit and Docker can restart it cleanly.
+        if self._trigger == ChangeType.STABLE_STUDY:
+            resource_type = "study"
+            resource_ids = self._source.studies.get_all_ids()
+        elif self._trigger == ChangeType.STABLE_SERIES:
+            resource_type = "series"
+            resource_ids = self._source.series.get_all_ids()
+        elif self._trigger == ChangeType.NEW_INSTANCE:
+            resource_type = "instance"
+            resource_ids = self._source.instances.get_all_ids()
+        else:
+            raise NotImplementedError()
+
         # create worker threads
         for thread_id in range(0, self._worker_threads_count):
             self._worker_threads.append(threading.Thread(
@@ -182,31 +297,8 @@ class OrthancForwarder:
         for wt in self._worker_threads:
             wt.start()
 
-        if self._trigger == ChangeType.STABLE_STUDY:
-            studies_ids = self._source.studies.get_all_ids()
-            if len(studies_ids) > 0:
-                for study_id in studies_ids:
-                    self._resources_to_process.put(ResourceToForward(type="study", resource_id=study_id))
-            else:
-                logger.debug("No studies found in Orthanc")
-
-        elif self._trigger == ChangeType.STABLE_SERIES:
-            series_ids = self._source.series.get_all_ids()
-            if len(series_ids) > 0:
-                for series_id in series_ids:
-                    self._resources_to_process.put(ResourceToForward(type="series", resource_id=series_id))
-            else:
-                logger.debug("No series found in Orthanc")
-
-        elif self._trigger == ChangeType.NEW_INSTANCE:
-            instances_ids = self._source.instances.get_all_ids()
-            if len(instances_ids) > 0:
-                for instance_id in instances_ids:
-                    self._resources_to_process.put(ResourceToForward(type="instance", resource_id=instance_id))
-            else:
-                logger.debug("No instances found in Orthanc")
-        else:
-            raise NotImplementedError()
+        for resource_id in resource_ids:
+            self._resources_to_process.put(ResourceToForward(type=resource_type, resource_id=resource_id))
 
         # post one 'empty' exit message per thread to unlock the threads from waiting on the process queue
         for i in range(0, self._worker_threads_count):
@@ -252,8 +344,20 @@ class OrthancForwarder:
         self.stop()
 
     def _handle_study(self, study_id: str, api_client):
+        if self._trigger == ChangeType.STABLE_STUDY and not self._is_study_stable(study_id, api_client):
+            logger.debug(f"Study {study_id} is not stable yet")
+            return
+
         instances_set = InstancesSet.from_study(api_client=api_client, study_id=study_id)
         self.handle_instances_set(instances_set)
+
+    def _is_study_stable(self, study_id: str, api_client) -> bool:
+        try:
+            study = api_client.studies.get(study_id)
+            return study.is_stable
+        except ResourceNotFound:
+            logger.debug(f"Study {study_id} disappeared before it could be handled")
+            return False
 
     def _handle_series(self, series_id: str, api_client):
         instances_set = InstancesSet.from_series(api_client=api_client, series_id=series_id)
@@ -285,14 +389,62 @@ class OrthancForwarder:
                 logger.info(f"{instances_set} Processing ... done")
             except exceptions.OrthancApiException as ex:
                 logger.error(f"{instances_set} Error while processing: {str(ex)}")
+                return False
             except Exception as ex:
                 logger.error(f"{instances_set} Error while processing: {str(ex)}", exc_info=True)
                 return False
 
         return True
 
-    def forward(self, instances_set, already_sent_to_destinations: List[str]) -> List[str]:  # returns a list of destinations where the data has been sent
-        sent_to_destinations = []
+    def _schedule_retry(self, instances_set: InstancesSet, status: ForwarderInstancesSetStatus):
+        retry_count = status.retry_count
+        next_retry = datetime.datetime.now() + datetime.timedelta(
+            seconds=self.retry_intervals[min(retry_count, len(self.retry_intervals) - 1)]
+        )
+        logger.info(f"{instances_set} Failed, will retry at {next_retry}")
+
+        status.next_retry = next_retry
+        status.retry_count = retry_count + 1
+
+    def _resource_client(self):
+        if self._trigger == ChangeType.STABLE_STUDY:
+            return self._source.studies
+        if self._trigger == ChangeType.STABLE_SERIES:
+            return self._source.series
+        if self._trigger == ChangeType.NEW_INSTANCE:
+            return self._source.instances
+        raise NotImplementedError()
+
+    def _is_terminal(self, instances_set: InstancesSet):
+        return self._resource_client().get_string_metadata(
+            instances_set.id,
+            metadata_name=TERMINAL_METADATA_NAME,
+            default_value="",
+        ) == self._terminal_marker(instances_set)
+
+    def _terminal_marker(self, instances_set: InstancesSet):
+        study_id = self._get_study_id(instances_set)
+        study_last_update = ""
+        if study_id:
+            study = self._source.studies.get(study_id)
+            study_last_update = getattr(study, "last_update", "") or ""
+        return f"{self._terminal_configuration}:{study_last_update}"
+
+    def _mark_as_terminal(self, instances_set: InstancesSet):
+        logger.info(f"{instances_set} No eligible destinations matched; keeping source data")
+        self._resource_client().set_string_metadata(
+            instances_set.id,
+            metadata_name=TERMINAL_METADATA_NAME,
+            content=self._terminal_marker(instances_set),
+        )
+        del self._status[instances_set.id]
+
+    def forward(self, instances_set, already_sent_to_destinations: List[str]) -> Tuple[List[str], List[str]]:  # returns (sent destinations, eligible destinations)
+        sent_to_destinations = list(already_sent_to_destinations)
+        eligible_destinations = []
+        study_description = None
+        study_description_loaded = False
+        study_description_error = None
 
         # has_been_sent_to = self._status[instances_set.id].sent_to_destinations
         # check the metadata of a random instance to detect to which destinations it has already been sent (which would mean that we are retrying to process the set)
@@ -300,18 +452,46 @@ class OrthancForwarder:
 
         for dest in self._destinations:
             try:
-
-                if dest.destination not in already_sent_to_destinations:
-                    logger.info(f"{instances_set} Sending to {dest.destination} using {dest.forwarder_mode}")
-                    self._forward_to_destination(
-                        instances_set=instances_set,
-                        destination=dest
-                    )
-                    logger.info(f"{instances_set} Sent")
-                else:
+                destination_retry_key = dest.retry_key
+                if destination_retry_key in already_sent_to_destinations:
+                    eligible_destinations.append(destination_retry_key)
                     logger.info(f"{instances_set} Sending ... already sent to {dest.destination} using {dest.forwarder_mode}")
+                    if self._on_instances_set_forwarded:
+                        self._on_instances_set_forwarded(instances_set=instances_set,
+                                                         destination=dest.destination)
+                    continue
 
-                sent_to_destinations.append(dest.destination)
+                if dest.study_description_match_type is not None:
+                    if study_description_error is not None:
+                        eligible_destinations.append(destination_retry_key)
+                        raise study_description_error
+
+                    if not study_description_loaded:
+                        try:
+                            study_description = self._get_study_description(instances_set)
+                            study_description_loaded = True
+                        except Exception as ex:
+                            study_description_error = ex
+                            eligible_destinations.append(destination_retry_key)
+                            raise
+
+                    if not dest.matches_study_description(study_description):
+                        logger.info(
+                            f"{instances_set} Skipping {dest.destination}: "
+                            f"StudyDescription '{study_description or ''}' does not match "
+                            f"{dest.study_description_match_type} filter '{dest.study_description_pattern}'"
+                        )
+                        continue
+
+                eligible_destinations.append(destination_retry_key)
+                logger.info(f"{instances_set} Sending to {dest.destination} using {dest.forwarder_mode}")
+                self._forward_to_destination(
+                    instances_set=instances_set,
+                    destination=dest
+                )
+                logger.info(f"{instances_set} Sent")
+                sent_to_destinations.append(destination_retry_key)
+
                 if self._on_instances_set_forwarded:
                     self._on_instances_set_forwarded(instances_set=instances_set,
                                                      destination=dest.destination)
@@ -328,8 +508,7 @@ class OrthancForwarder:
                     self._on_instances_set_forward_error(instances_set=instances_set,
                                                          destination=dest.destination,
                                                          error=str(ex))
-
-        return sent_to_destinations
+        return sent_to_destinations, eligible_destinations
             # has_been_sent_to = self._source.instances.get_string_metadata(instances_set.instances_ids[0], metadata_name=str(ForwarderMetadata.SENT_TO_DESTINATIONS.value), default_value="").split(",")
 
 
@@ -348,9 +527,14 @@ class OrthancForwarder:
     def handle_instances_set(self, instances_set: InstancesSet):
 
         if instances_set.id not in self._status:
+            if self._is_terminal(instances_set):
+                logger.debug(f"{instances_set} Skipping permanently ineligible content")
+                return
             self._status[instances_set.id] = ForwarderInstancesSetStatus()
-        elif self._status[instances_set.id].next_retry:  # this is a retry !
-            if datetime.datetime.now() < self._status[instances_set.id].next_retry:
+        status = self._status[instances_set.id]
+
+        if status.next_retry:  # this is a retry !
+            if datetime.datetime.now() < status.next_retry:
                 logger.debug(f"{instances_set} Skipping while waiting for retry")
                 return
 
@@ -360,25 +544,27 @@ class OrthancForwarder:
         instances_set = self.filter(instances_set)
 
         # process
-        if not self._status[instances_set.id].processed:
-            self._status[instances_set.id].processed = self.process(instances_set)
+        if not status.processed:
+            status.processed = self.process(instances_set)
+            if not status.processed:
+                self._schedule_retry(instances_set, status)
+                return
         else:
             logger.info(f"{instances_set} Skipping processing that has already been performed")
 
         # forward
-        sent_to_destinations = self.forward(instances_set, self._status[instances_set.id].sent_to_destinations)
-        if len(sent_to_destinations) == len(self._destinations):
+        sent_to_destinations, eligible_destinations = self.forward(instances_set, status.sent_to_destinations)
+        status.sent_to_destinations = sent_to_destinations
+
+        if len(eligible_destinations) == 0:
+            self._mark_as_terminal(instances_set)
+            return
+
+        if len(sent_to_destinations) == len(eligible_destinations):
             # delete
             self.delete(instances_set)
         else:
-            self._status[instances_set.id].sent_to_destinations = sent_to_destinations
-
-            retry_count = self._status[instances_set.id].retry_count
-            next_retry = datetime.datetime.now() + datetime.timedelta(seconds=self.retry_intervals[min(retry_count, len(self.retry_intervals) - 1)])
-            logger.info(f"{instances_set} Failed, will retry at {next_retry}")
-
-            self._status[instances_set.id].next_retry = next_retry
-            self._status[instances_set.id].retry_count = retry_count + 1
+            self._schedule_retry(instances_set, status)
             return
 
         logger.info(f"{instances_set} Handling ... Done")
@@ -432,6 +618,21 @@ class OrthancForwarder:
         else:
             raise NotImplementedError
 
+    def _get_study_id(self, instances_set: InstancesSet) -> Optional[str]:
+        study_id = getattr(instances_set, 'study_id', None)
+        if not study_id and len(instances_set.instances_ids) > 0:
+            study_id = self._source.instances.get_parent_study_id(instances_set.instances_ids[0])
+
+        return study_id
+
+    def _get_study_description(self, instances_set: InstancesSet) -> Optional[str]:
+        study_id = self._get_study_id(instances_set)
+        if not study_id:
+            return None
+
+        study = self._source.studies.get(study_id)
+        return study.main_dicom_tags.get('StudyDescription')
+
     def _set_string_metadata(self, instances_set: InstancesSet, metadata_name: str, content: str):
             instances_set.process_instances(lambda c, i: c.instances.set_string_metadata(
                 orthanc_id=i,
@@ -454,6 +655,80 @@ def add_parser_argument_w_alias(parser, name, *args, **kwargs):
     aliased = name.replace('_', '-')
     parser.add_argument(name, aliased, *args, **kwargs)
 
+
+def build_forwarder_destination(entry: str, default_mode: ForwarderMode) -> ForwarderDestination:
+    destination_spec = entry.strip()
+    if not destination_spec:
+        raise ValueError("Destination entries cannot be blank.")
+
+    parts = destination_spec.split(":", 3)
+    destination_name = parts[0].strip()
+    if not destination_name:
+        raise ValueError(f"Destination alias is missing in '{destination_spec}'.")
+
+    destination_mode = default_mode
+    if len(parts) > 1 and parts[1].strip():
+        destination_mode = _parse_mode(parts[1].strip(), f"destination '{destination_name}'")
+
+    study_description_match_type = None
+    study_description_pattern = None
+
+    if len(parts) > 2:
+        match_type_part = parts[2].strip().lower()
+        if not match_type_part:
+            raise ValueError(
+                f"StudyDescription match type is missing for destination '{destination_name}' in '{destination_spec}'."
+            )
+
+        valid_match_types = {m.value for m in StudyDescriptionMatchType}
+        if match_type_part not in valid_match_types:
+            raise ValueError(
+                f"Invalid StudyDescription match type '{parts[2]}' for destination '{destination_name}'. "
+                f"Allowed values: {sorted(valid_match_types)}"
+            )
+
+        if len(parts) < 4 or not parts[3].strip():
+            raise ValueError(
+                f"StudyDescription filter pattern is missing for destination '{destination_name}' in '{destination_spec}'."
+            )
+
+        study_description_match_type = StudyDescriptionMatchType(match_type_part)
+        study_description_pattern = parts[3].strip()
+
+    return ForwarderDestination(
+        destination=destination_name,
+        forwarder_mode=destination_mode,
+        study_description_match_type=study_description_match_type,
+        study_description_pattern=study_description_pattern
+    )
+
+
+def parse_forwarder_destinations(raw_destinations: List[str], default_mode: ForwarderMode) -> List[ForwarderDestination]:
+    return [build_forwarder_destination(dest, default_mode) for dest in raw_destinations]
+
+
+def split_destination_entries(raw_value: str) -> List[str]:
+    if not raw_value:
+        return []
+
+    reader = csv.reader([raw_value], skipinitialspace=True)
+    return [entry.strip() for entry in next(reader) if entry.strip()]
+
+
+def split_cli_destination_entries(raw_values: List[str]) -> List[str]:
+    raw_destinations = []
+    for raw_value in raw_values:
+        raw_destinations.extend(split_destination_entries(raw_value))
+    return raw_destinations
+
+
+def _parse_mode(mode_value: str, context: str) -> ForwarderMode:
+    normalized = mode_value.lower()
+    valid_modes = {m.value for m in ForwarderMode}
+    if normalized not in valid_modes:
+        raise ValueError(f"Invalid mode '{mode_value}' for {context}. Allowed modes: {sorted(valid_modes)}")
+    return ForwarderMode(normalized)
+
 if __name__ == '__main__':
     level = logging.INFO
 
@@ -462,7 +737,7 @@ if __name__ == '__main__':
 
     logging.basicConfig(level=level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-    valid_modes = [m.value for m in ForwarderMode]
+    valid_modes = {m.value for m in ForwarderMode}
 
     parser = argparse.ArgumentParser(description='Forwards everything Orthanc receives to another Orthanc peer, a DICOM modality or DicomWeb server.')
 
@@ -470,11 +745,19 @@ if __name__ == '__main__':
     add_parser_argument_w_alias(parser, '--source_user', type=str, default=None, help='Orthanc source user name')
     add_parser_argument_w_alias(parser, '--source_pwd', type=str, default=None, help='Orthanc source password')
     add_parser_argument_w_alias(parser, '--source_api_key', type=str, default=None, help='Orthanc source api-key')
-    add_parser_argument_w_alias(parser, '--destination', type=str, default=None, help='Orthanc destination alias')
+    add_parser_argument_w_alias(
+        parser,
+        '--destination',
+        type=str,
+        action='append',
+        default=[],
+        help='Destination alias with optional mode override and StudyDescription filter '
+             '(alias[:mode[:substring:pattern|:regex:pattern]]). Repeat flag to add multiple destinations.'
+    )
     add_parser_argument_w_alias(parser, '--worker_threads_count', type=int, default=1, help='Number of worker threads')
     add_parser_argument_w_alias(parser, '--polling_interval', type=int, default=1, help='Polling interval (in seconds)')
     add_parser_argument_w_alias(parser, '--trigger', type=str, default=None, help='NewInstance or StableStudy')
-    add_parser_argument_w_alias(parser, '--mode', type=str, default='dicom', help=f'Forwarder mode. One of: {", ".join(valid_modes)}')
+    add_parser_argument_w_alias(parser, '--mode', type=str, default='dicom', help=f'Default forwarder mode. One of: {", ".join(sorted(valid_modes))}')
 
     args = parser.parse_args()
 
@@ -482,7 +765,20 @@ if __name__ == '__main__':
     source_user = os.environ.get("SOURCE_USER", args.source_user)
     source_pwd = os.environ.get("SOURCE_PWD", args.source_pwd)
     source_api_key = os.environ.get("SOURCE_API_KEY", args.source_api_key)
-    destination = os.environ.get("DESTINATION", args.destination)
+    destinations_env = os.environ.get("DESTINATIONS")
+    destination_env = os.environ.get("DESTINATION")
+    dest_from_args = args.destination or []
+    raw_destinations = []
+
+    if destinations_env:
+        raw_destinations = split_destination_entries(destinations_env)
+    elif destination_env:
+        raw_destinations = [destination_env.strip()]
+    elif dest_from_args:
+        raw_destinations = split_cli_destination_entries(dest_from_args)
+
+    if not raw_destinations:
+        raise ValueError("At least one destination must be provided via --destination, DESTINATION, or DESTINATIONS.")
     worker_threads_count = int(os.environ.get("WORKER_THREADS_COUNT", str(args.worker_threads_count)))
     polling_interval_in_seconds = int(os.environ.get("POLLING_INTERVAL", str(args.polling_interval)))
     trigger = os.environ.get("TRIGGER", args.trigger)
@@ -496,10 +792,8 @@ if __name__ == '__main__':
     else:
         raise ValueError("Trigger parameter not valid!")
 
-    # Validate mode
-    if mode_str not in valid_modes:
-        raise ValueError(f"Invalid mode: {mode_str}. Allowed modes: {valid_modes}")
-    chosen_mode = ForwarderMode(mode_str)
+    # Validate default mode
+    chosen_mode = _parse_mode(mode_str, "default mode (--mode/MODE)")
 
     # Create API client
     if source_api_key is not None:
@@ -507,9 +801,11 @@ if __name__ == '__main__':
     else:
         api_client = OrthancApiClient(source_url, user=source_user, pwd=source_pwd, pool_maxsize=max(10, worker_threads_count), pool_block=True)
 
+    forwarder_destinations = parse_forwarder_destinations(raw_destinations, chosen_mode)
+
     forwarder = OrthancForwarder(
         source=api_client,
-        destinations=[ForwarderDestination(destination=destination, forwarder_mode=chosen_mode)],
+        destinations=forwarder_destinations,
         trigger=trigger,
         worker_threads_count=worker_threads_count,
         polling_interval_in_seconds=polling_interval_in_seconds

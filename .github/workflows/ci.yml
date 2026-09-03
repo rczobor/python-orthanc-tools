@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  mp-docker-forwarder:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build the production image
+        run: docker build --tag python-orthanc-tools:ci .
+
+      - name: Run focused unit tests
+        run: >-
+          docker run --rm
+          --mount type=bind,source="$PWD",target=/work,readonly
+          python-orthanc-tools:ci
+          python -m unittest discover -s /work/tests -p "test_orthanc_forwarder*.py"
+
+      - name: Run the mp-docker forwarding workflow
+        run: |
+          docker compose --project-name mp-forwarder-ci -f tests/docker-setup/docker-compose.yml up -d
+
+          docker run -d \
+            --name mp-forwarder-ci-forwarder \
+            --network mp-forwarder-ci_default \
+            -e SOURCE_URL=http://orthanc-a:8042 \
+            -e SOURCE_USER=test \
+            -e SOURCE_PWD=test \
+            -e DESTINATIONS=orthanc-b:dicom,orthanc-c:dicom:substring:RTG \
+            -e TRIGGER=StableStudy \
+            -e POLLING_INTERVAL=1 \
+            -e HEARTBEAT_FILE=/tmp/forwarder-heartbeat \
+            --health-cmd 'test -f /tmp/forwarder-heartbeat && find /tmp/forwarder-heartbeat -mmin -1 | grep -q .' \
+            --health-interval 2s \
+            --health-timeout 2s \
+            --health-retries 15 \
+            python-orthanc-tools:ci \
+            python -u -m orthanc_tools.orthanc_forwarder
+
+          for _ in {1..30}; do
+            if [ "$(docker inspect --format '{{.State.Health.Status}}' mp-forwarder-ci-forwarder)" = healthy ]; then
+              break
+            fi
+            sleep 1
+          done
+          test "$(docker inspect --format '{{.State.Health.Status}}' mp-forwarder-ci-forwarder)" = healthy
+
+          docker run --rm \
+            --network mp-forwarder-ci_default \
+            --mount type=bind,source="$PWD",target=/work,readonly \
+            -e ORTHANC_SOURCE_URL=http://orthanc-a:8042 \
+            -e ORTHANC_ALWAYS_DESTINATION_URL=http://orthanc-b:8042 \
+            -e ORTHANC_FILTERED_DESTINATION_URL=http://orthanc-c:8042 \
+            -e ORTHANC_TEST_ALLOW_DELETE=1 \
+            python-orthanc-tools:ci \
+            python /work/tests/test_mp_docker_forwarder.py
+
+      - name: Show integration logs after failure
+        if: failure()
+        run: |
+          docker logs mp-forwarder-ci-forwarder || true
+          docker compose --project-name mp-forwarder-ci -f tests/docker-setup/docker-compose.yml logs || true
+
+      - name: Clean up integration containers
+        if: always()
+        run: |
+          docker rm --force mp-forwarder-ci-forwarder 2>/dev/null || true
+          docker compose --project-name mp-forwarder-ci -f tests/docker-setup/docker-compose.yml down --volumes

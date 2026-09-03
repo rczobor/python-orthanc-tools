@@ -99,15 +99,52 @@ $ docker exec -it xxxx bash
 
 ## Implement a simple forwarder
 
-The forwarder simply forwards the content of an Orthanc to another DICOM destination and then, deletes
-the instances.  This is usefull for, e.g. implementing an Inbox in front of a PACS that does some
+The forwarder forwards the content of an Orthanc to one or more destinations and then deletes
+the source instances after every eligible destination has succeeded. This is useful for, e.g. implementing an Inbox in front of a PACS that does some
 `IngestTranscoding` and/or applies sanitization in a lua script or a python plugin.
 
-from a shell:
+When using `--trigger=StableStudy`, forwarding starts only after Orthanc reports a study as stable.
+Set `StableAge` on the source Orthanc to control how long it waits after the last received instance.
+
+From a shell, for one destination:
 
 ```shell
 python3 -m orthanc_tools.orthanc_forwarder --source_url=http://192.168.0.10:8042 --source_user=user --source_pwd=pwd --destination=target_modality_alias --trigger=StableStudy
 ```
+
+Repeat `--destination`, or use a comma-separated `DESTINATIONS` environment variable, to forward to
+multiple destinations. Each entry accepts an optional mode and a case-insensitive `StudyDescription`
+filter:
+
+```shell
+python3 -m orthanc_tools.orthanc_forwarder \
+  --source_url=http://localhost:8042 \
+  --destination=archive:dicom \
+  --destination=rtg:dicom:substring:RTG \
+  --destination='ai:dicom:regex:^AI[ _-]' \
+  --trigger=StableStudy
+```
+
+The entry format is `alias[:mode[:substring|regex:pattern]]`. An empty mode uses the global `MODE`,
+for example `rtg::substring:RTG`. Quote an entry if its pattern contains a comma. A missing
+`StudyDescription` does not match a filtered destination.
+
+For Docker Compose, the equivalent configuration is:
+
+```yaml
+environment:
+  SOURCE_URL: http://orthanc:8042
+  DESTINATIONS: archive:dicom,rtg:dicom:substring:RTG
+  TRIGGER: StableStudy
+  HEARTBEAT_FILE: /tmp/forwarder-heartbeat
+```
+
+`DESTINATION` remains supported for a single destination. `MODE` sets the default mode. When
+`HEARTBEAT_FILE` is set, the forwarder periodically touches that file for a container health check.
+
+If no configured destination matches a study, the source data is retained. The skip is persisted in
+Orthanc metadata to avoid an endless retry loop and is reconsidered when the study or routing
+configuration changes.
 
 
 ## migrate DICOM Data from a modality to another
