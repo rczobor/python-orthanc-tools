@@ -1,5 +1,6 @@
 import os, time
 import logging
+from orthanc_tools.helpers.logging_config import configure_logging
 import argparse
 import datetime
 from .helpers.scheduler import Scheduler
@@ -364,8 +365,7 @@ if __name__ == '__main__':
     if os.environ.get('VERBOSE_ENABLED'):
         level = logging.DEBUG
 
-    logging.basicConfig(level=level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    configure_logging(level=level)
 
     parser = argparse.ArgumentParser(description='Compare the content of Orthanc with the content of a remote modality')
     parser.add_argument('--url', type=str, default='http://localhost:8042', help='Orthanc url')

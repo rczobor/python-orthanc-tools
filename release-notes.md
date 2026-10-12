@@ -1,9 +1,12 @@
-Pending fork maintenance
-========================
+v 0.23.1 (fork maintenance)
+==========================
 - Preserve multi-destination forwarding, StudyDescription routing, stable-study processing, and mp-docker workflow tests.
-- Fix forwarding safety, routing metadata, worker recovery, and container health reporting.
+- Verify forwarding job success before source deletion; persist destination/unit receipts and block uncertain submissions.
+- Use actual Orthanc resource IDs for routing metadata; keep pending jobs recoverable across restart and job-history pruning.
+- Bound HTTP/job waits, clean up workers, recycle idle polling connections, and tie health to processing/API activity.
 - Quiet urllib3 connection-pool warnings in tool CLIs while preserving application failures.
-- Preserve existing cleaner rules and make worklist and backup replacement safe.
+- Preserve four-column cleaner rules; create worklists before deleting old items and publish backups atomically with verified SFTP host keys.
+- Pin image/runtime/build dependencies and expand Python, container, failure/recovery, and opt-in integration checks.
 
 v 0.23.0
 ========

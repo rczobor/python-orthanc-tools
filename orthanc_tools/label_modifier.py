@@ -3,6 +3,7 @@ import pprint
 
 import inquirer
 import logging
+from orthanc_tools.helpers.logging_config import configure_logging
 import argparse
 from orthanc_api_client import OrthancApiClient
 import sys
@@ -246,7 +247,7 @@ class LabelModifier:
 if __name__ == '__main__':
     level = logging.INFO
 
-    logging.basicConfig(level=level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    configure_logging(level=level)
 
     parser = argparse.ArgumentParser(description="Ask user to choose a label to modify.")
     parser.add_argument('--orthanc_url', help="The url of the Orthanc to modifiy the label to.", default="http://localhost:8042")

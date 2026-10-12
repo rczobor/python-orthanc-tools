@@ -1,6 +1,7 @@
 import time, sys
 import argparse
 import logging
+from orthanc_tools.helpers.logging_config import configure_logging
 from orthanc_api_client import OrthancApiClient
 import os
 
@@ -48,7 +49,7 @@ if __name__ == '__main__':
     level = logging.INFO
     if os.environ.get('VERBOSE_ENABLED'):
         level = logging.DEBUG
-    logging.basicConfig(level=level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    configure_logging(level=level)
 
     parser = argparse.ArgumentParser(description='Periodically queries Orthanc to keep the database warm.')
     parser.add_argument('--url', type=str, default='http://localhost:8042', help='Orthanc url')

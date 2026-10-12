@@ -1,6 +1,7 @@
 import inquirer
 from pathlib import Path
 import logging
+from orthanc_tools.helpers.logging_config import configure_logging
 import argparse
 from orthanc_api_client import OrthancApiClient
 import os, time, sys
@@ -151,7 +152,7 @@ class OrthancUploader:
 if __name__ == '__main__':
     level = logging.INFO
 
-    logging.basicConfig(level=level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    configure_logging(level=level)
 
     parser = argparse.ArgumentParser(description="Upload studies from a selected folder and recursively in all subfolders to an Orthanc and apply labels.")
     parser.add_argument('--url', help="The url of the Orthanc to upload studies to.", default="http://localhost:8042")

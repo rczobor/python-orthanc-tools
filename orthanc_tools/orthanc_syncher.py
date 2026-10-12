@@ -1,5 +1,6 @@
 import os, time
 import logging
+from orthanc_tools.helpers.logging_config import configure_logging
 import argparse
 import tempfile
 import datetime
@@ -299,8 +300,7 @@ if __name__ == '__main__':
     if os.environ.get('VERBOSE_ENABLED'):
         level = logging.DEBUG
 
-    logging.basicConfig(level=level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    configure_logging(level=level)
 
     parser = argparse.ArgumentParser(description='Ensure that all the studies/series/instances stored in Orthanc-1 are also stored in Orthanc-2.')
     parser.add_argument('--url_1', type=str, default='http://localhost:8042', help='Orthanc-1 url')

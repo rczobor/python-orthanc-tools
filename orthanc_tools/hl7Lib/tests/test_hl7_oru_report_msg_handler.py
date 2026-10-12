@@ -1,3 +1,4 @@
+import uuid
 import pathlib
 import subprocess
 import unittest, os, glob
@@ -15,15 +16,15 @@ class TestHl7OruReportMsgHandler(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        subprocess.run(["docker", "compose", "down", "-v"], cwd=here/"tests/docker-setup")
-        subprocess.run(["docker", "compose", "up", "-d"], cwd=here/"tests/docker-setup")
+        if os.environ.get("ORTHANC_TEST_ALLOW_DELETE") != "1":
+            raise unittest.SkipTest("Destructive Docker tests require ORTHANC_TEST_ALLOW_DELETE=1 and an isolated daemon")
+        cls.compose_command = ["docker", "compose", "--project-name", f"orthanc-tools-tests-{uuid.uuid4().hex[:12]}"]
+        cls.addClassCleanup(subprocess.run, cls.compose_command + ["down", "--volumes"], cwd=here/"tests/docker-setup", check=True)
+        subprocess.run(cls.compose_command + ["up", "-d"], cwd=here/"tests/docker-setup", check=True)
 
         cls.oa = OrthancApiClient('http://localhost:10042', user='test', pwd='test')
         cls.oa.wait_started()
 
-    @classmethod
-    def tearDownClass(cls):
-        subprocess.run(["docker", "compose", "down", "-v"], cwd=here/"tests/docker-setup")
 
     def test_ried_reports(self):
 

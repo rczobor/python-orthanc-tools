@@ -1,5 +1,6 @@
 import argparse
 import logging
+from orthanc_tools.helpers.logging_config import configure_logging
 from orthanc_api_client import OrthancApiClient
 from typing import List
 import zipfile
@@ -270,7 +271,7 @@ class OrthancFolderImporter:
             t.join()
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    configure_logging(level=logging.INFO)
 
     parser = argparse.ArgumentParser(description='Import the content of a folder in Orthanc')
     parser.add_argument('--url', type=str, default='http://localhost:8042', help='Orthanc url')

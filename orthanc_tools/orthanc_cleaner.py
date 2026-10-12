@@ -28,6 +28,7 @@ import schedule
 import time
 import argparse
 import logging
+from orthanc_tools.helpers.logging_config import configure_logging
 from typing import List
 import os
 from orthanc_api_client import OrthancApiClient, helpers, LabelsConstraint
@@ -146,17 +147,31 @@ class OrthancCleaner:
         '''
 
         labels_rules = []
-        with open(self._labels_file_path, 'r') as csv_file:
+        with open(self._labels_file_path, 'r', newline='') as csv_file:
             reader = csv.reader(csv_file)
 
-            for row in reader:
+            for line_number, row in enumerate(reader, start=1):
+                if not row or all(not value.strip() for value in row):
+                    continue
+                if len(row) not in (4, 5):
+                    raise ValueError(f"Invalid cleaner rule on line {line_number}: expected 4 or 5 columns")
+                row = [value.strip() for value in row]
+                keep = row[4] if len(row) == 5 else ''
+                if keep not in ('', 'keep'):
+                    raise ValueError(f"Invalid cleaner rule on line {line_number}: fifth column must be empty or 'keep'")
+                if keep and not row[0]:
+                    raise ValueError(f"Invalid cleaner rule on line {line_number}: 'keep' requires a label")
+                try:
+                    retention_duration = int(row[1])
+                except ValueError as ex:
+                    raise ValueError(f"Invalid cleaner rule on line {line_number}: retention must be an integer number of weeks") from ex
                 labels_rules.append(
                     LabelRule(
                         row[0],
-                        int(row[1]),
+                        retention_duration,
                         row[2],
                         row[3],
-                        True if row[4] == 'keep' else False
+                        keep == 'keep'
                     )
                 )
         return labels_rules
@@ -184,7 +199,7 @@ if __name__ == '__main__':
     if os.environ.get('VERBOSE_ENABLED'):
         level = logging.DEBUG
 
-    logging.basicConfig(level=level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    configure_logging(level=level)
 
     parser = argparse.ArgumentParser(description='Clean the Orthanc by deleting the oldest studies according to the labels applied on them.')
     parser.add_argument('--orthanc_url', type=str, default=None, help='Orthanc source url')

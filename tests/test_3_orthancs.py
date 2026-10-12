@@ -1,3 +1,4 @@
+import uuid
 import threading
 import time
 import sys
@@ -37,8 +38,11 @@ class Test3Orthancs(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        subprocess.run(["docker", "compose", "down", "-v"], cwd=here/"docker-setup")
-        subprocess.run(["docker", "compose", "up", "-d"], cwd=here/"docker-setup")
+        if os.environ.get("ORTHANC_TEST_ALLOW_DELETE") != "1":
+            raise unittest.SkipTest("Destructive Docker tests require ORTHANC_TEST_ALLOW_DELETE=1 and an isolated daemon")
+        cls.compose_command = ["docker", "compose", "--project-name", f"orthanc-tools-tests-{uuid.uuid4().hex[:12]}"]
+        cls.addClassCleanup(subprocess.run, cls.compose_command + ["down", "--volumes"], cwd=here/"docker-setup", check=True)
+        subprocess.run(cls.compose_command + ["up", "-d"], cwd=here/"docker-setup", check=True)
 
         cls.oa = OrthancApiClient('http://localhost:10042', user='test', pwd='test')
         cls.oa.wait_started()
@@ -47,9 +51,6 @@ class Test3Orthancs(unittest.TestCase):
         cls.oc = OrthancApiClient('http://localhost:10044', user='test', pwd='test')
         cls.oc.wait_started()
 
-    @classmethod
-    def tearDownClass(cls):
-        subprocess.run(["docker", "compose", "down", "-v"], cwd=here/"docker-setup")
 
     def test_cloner_default(self):
         self.oa.delete_all_content()
@@ -1290,14 +1291,15 @@ class Test3Orthancs(unittest.TestCase):
 
         # delete the file from the storage
         subprocess.run(
-            [
-                "docker",
+            self.compose_command + [
                 "exec",
-                "docker-setup-orthanc-a-1",
+                "-T",
+                "orthanc-a",
                 "sh",
                 "-c",
                 "find /var/lib/orthanc/db/ -mindepth 1 -depth -type d -name '??' -exec rm -rf {} +",
             ],
+            cwd=here / "docker-setup",
             check=True,
         )
 
