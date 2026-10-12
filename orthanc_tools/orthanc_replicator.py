@@ -4,6 +4,7 @@ import time
 
 import pika
 import logging
+from orthanc_tools.helpers.logging_config import configure_logging
 import os
 
 from orthanc_api_client import OrthancApiClient, ResourceType, JobStatus, ResourceNotFound
@@ -241,7 +242,7 @@ if __name__ == '__main__':
     if os.environ.get('VERBOSE_ENABLED'):
         level = logging.DEBUG
 
-    logging.basicConfig(level=level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    configure_logging(level=level)
 
     parser = argparse.ArgumentParser(description='Replicates the content of an Orthanc into another Orthanc')
     parser.add_argument('--source_url', type=str, default=None, help='Orthanc source url')

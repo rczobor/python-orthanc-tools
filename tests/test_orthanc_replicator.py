@@ -1,3 +1,5 @@
+import uuid
+import os
 import time
 import subprocess
 from orthanc_api_client import OrthancApiClient, helpers
@@ -23,17 +25,17 @@ class TestOrthancReplicator(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        subprocess.run(["docker", "compose", "down", "-v"], cwd=here/"docker-setup-replicator")
-        subprocess.run(["docker", "compose", "up", "-d"], cwd=here/"docker-setup-replicator")
+        if os.environ.get("ORTHANC_TEST_ALLOW_DELETE") != "1":
+            raise unittest.SkipTest("Destructive Docker tests require ORTHANC_TEST_ALLOW_DELETE=1 and an isolated daemon")
+        cls.compose_command = ["docker", "compose", "--project-name", f"orthanc-tools-tests-{uuid.uuid4().hex[:12]}"]
+        cls.addClassCleanup(subprocess.run, cls.compose_command + ["down", "--volumes"], cwd=here/"docker-setup-replicator", check=True)
+        subprocess.run(cls.compose_command + ["up", "-d"], cwd=here/"docker-setup-replicator", check=True)
 
         cls.oa = OrthancApiClient('http://localhost:10042', user='test', pwd='test')
         cls.oa.wait_started()
         cls.ob = OrthancApiClient('http://localhost:10043', user='test', pwd='test')
         cls.ob.wait_started()
 
-    @classmethod
-    def tearDownClass(cls):
-        subprocess.run(["docker", "compose", "down", "-v"], cwd=here/"docker-setup-replicator")
 
     def get_rabbitmq_connection_params(self):
         broker_connection_parameters = pika.ConnectionParameters(
@@ -100,21 +102,23 @@ class TestOrthancReplicator(unittest.TestCase):
         connection.close()
 
     def get_number_of_running_containers(self):
-        bash_cmd = "docker ps | tail -n +2 | wc -l"
-        running_containers = int(subprocess.check_output(bash_cmd, shell=True))
-        return running_containers
+        ids = subprocess.check_output(self.compose_command + ["ps", "--status", "running", "-q"],
+                                      cwd=here / "docker-setup-replicator", text=True)
+        return len(ids.splitlines())
 
     def stop_container(self, container_name: str):
-        bash_cmd = f"docker stop {container_name}"
-        subprocess.check_output(bash_cmd, shell=True)
+        subprocess.run(self.compose_command + ["stop", container_name],
+                       cwd=here / "docker-setup-replicator", check=True)
 
     def start_container(self, container_name: str):
-        bash_cmd = f"docker start {container_name}"
-        subprocess.check_output(bash_cmd, shell=True)
+        subprocess.run(self.compose_command + ["start", container_name],
+                       cwd=here / "docker-setup-replicator", check=True)
 
     def get_container_status(self, container_name: str):
-        bash_cmd = f"docker inspect --format={{{{.State.Health.Status}}}} {container_name}"
-        return subprocess.check_output(bash_cmd, shell=True)
+        container_id = subprocess.check_output(self.compose_command + ["ps", "-q", container_name],
+                                               cwd=here / "docker-setup-replicator", text=True).strip()
+        return subprocess.check_output(["docker", "inspect", "--format={{.State.Health.Status}}", container_id],
+                                       text=True).strip()
 
     def test_forward_and_delete_instance(self):
 

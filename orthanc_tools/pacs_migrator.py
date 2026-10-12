@@ -4,6 +4,7 @@ import threading
 import time
 import os
 import logging
+from orthanc_tools.helpers.logging_config import configure_logging
 import argparse
 import datetime
 import multiprocessing
@@ -195,7 +196,7 @@ if __name__ == '__main__':
     if os.environ.get('VERBOSE_ENABLED'):
         level = logging.DEBUG
 
-    logging.basicConfig(level=level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    configure_logging(level=level)
 
     parser = argparse.ArgumentParser(description='Migrate the content of a remote modality to another modality')
     parser.add_argument('--url', type=str, default=None, help='Orthanc url (migrator)')

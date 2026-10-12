@@ -7,15 +7,17 @@ and potentially to the modality type.
 The script will run every day at specified time.
 It will read a configuration file defining what should be done:
 
-LABEL1,6,,
-LABEL2,12,,
-LABEL2,4,CT,
-,6,,acc-nr
+LABEL1,6,,,
+LABEL2,12,,,
+LABEL2,4,CT,,
+,6,,acc-nr,
+TO_KEEP,52,,,keep
 
 With that sample, all studies with the LABEL1 and older than 6 weeks will be deleted
 all studies with the LABEL2 and older than 12 weeks will be deleted;
 all studies with the LABEL2, which have CT in the 'ModalitiesInStudy' tag and older than 4 weeks will be deleted;
-all studies with or without a label, older than 6 weeks and with an AccessionNumber value equal to "acc-nr" will be deleted
+all studies with or without a label, older than 6 weeks and with an AccessionNumber value equal to "acc-nr" will be deleted;
+all studies without the label TO_KEEP, older than 52 weeks will be deleted;
 
 Note: studies are deleted only if they were uploaded/modified in Orthanc before the retention period
 '''
@@ -26,9 +28,10 @@ import schedule
 import time
 import argparse
 import logging
+from orthanc_tools.helpers.logging_config import configure_logging
 from typing import List
 import os
-from orthanc_api_client import OrthancApiClient, helpers
+from orthanc_api_client import OrthancApiClient, helpers, LabelsConstraint
 import csv
 
 logger = logging.getLogger(__name__)
@@ -38,12 +41,14 @@ class LabelRule:
                  label_name: str,
                  retention_duration: int,    # unit: week
                  modality: str = "",
-                 accession_number: str = ""
+                 accession_number: str = "",
+                 keep: bool = False
                  ):
         self.label_name = label_name
         self.retention_duration = retention_duration
         self.modality = modality
         self.accession_number = accession_number
+        self.keep = keep
 
 class OrthancCleaner:
 
@@ -109,6 +114,10 @@ class OrthancCleaner:
             if label_to_search != '':
                 labels.append(label_to_search)
 
+            label_constraint = LabelsConstraint.ANY
+            if label_rule.keep:
+                label_constraint = LabelsConstraint.NONE
+
             # Query Orthanc based on the date and the label
             studies_to_delete_by_study_date = self._api_client.studies.find(
                 query={
@@ -116,8 +125,9 @@ class OrthancCleaner:
                     'ModalitiesInStudy': label_rule.modality,
                     'AccessionNumber': label_rule.accession_number
                 },
-                labels=labels
-                )
+                labels=labels,
+                labels_constraint=label_constraint
+            )
 
             # Filter out the old studies which were recently stored in Orthanc
             for s in studies_to_delete_by_study_date:
@@ -137,11 +147,33 @@ class OrthancCleaner:
         '''
 
         labels_rules = []
-        with open(self._labels_file_path, 'r') as csv_file:
+        with open(self._labels_file_path, 'r', newline='') as csv_file:
             reader = csv.reader(csv_file)
 
-            for row in reader:
-                labels_rules.append(LabelRule(row[0], int(row[1]), row[2], row[3]))
+            for line_number, row in enumerate(reader, start=1):
+                if not row or all(not value.strip() for value in row):
+                    continue
+                if len(row) not in (4, 5):
+                    raise ValueError(f"Invalid cleaner rule on line {line_number}: expected 4 or 5 columns")
+                row = [value.strip() for value in row]
+                keep = row[4] if len(row) == 5 else ''
+                if keep not in ('', 'keep'):
+                    raise ValueError(f"Invalid cleaner rule on line {line_number}: fifth column must be empty or 'keep'")
+                if keep and not row[0]:
+                    raise ValueError(f"Invalid cleaner rule on line {line_number}: 'keep' requires a label")
+                try:
+                    retention_duration = int(row[1])
+                except ValueError as ex:
+                    raise ValueError(f"Invalid cleaner rule on line {line_number}: retention must be an integer number of weeks") from ex
+                labels_rules.append(
+                    LabelRule(
+                        row[0],
+                        retention_duration,
+                        row[2],
+                        row[3],
+                        keep == 'keep'
+                    )
+                )
         return labels_rules
 
 
@@ -167,7 +199,7 @@ if __name__ == '__main__':
     if os.environ.get('VERBOSE_ENABLED'):
         level = logging.DEBUG
 
-    logging.basicConfig(level=level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    configure_logging(level=level)
 
     parser = argparse.ArgumentParser(description='Clean the Orthanc by deleting the oldest studies according to the labels applied on them.')
     parser.add_argument('--orthanc_url', type=str, default=None, help='Orthanc source url')

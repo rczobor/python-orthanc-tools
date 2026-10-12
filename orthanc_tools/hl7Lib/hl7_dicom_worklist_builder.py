@@ -76,7 +76,7 @@ class DicomWorklistBuilder:
         :param filename:
         :entropy_srcs: a SHA512 hash of the supplied list will be used for the UIDs which means the result is deterministic
         :avoid_duplicates: if True (and if the API is used, not the old file way), there will be a check on the acc Nr.
-        If there is already a WL with the acc nr found in the values dict, it will be deleted before the creation of a new wl item
+        Matching existing items are deleted only after the new item has been created successfully.
         :return: the filename created or the Orthanc ID if WL are stored into Orthanc
         """
         assert self._folder is not None or file_name is not None or self._orthanc_client is not None, "Please always provide a folder (or an Orthanc client) when creating the builder or provide a filename each time you generate a worklist"
@@ -136,25 +136,13 @@ class DicomWorklistBuilder:
 
     def _generate_wl_through_api(self, values: typing.Dict[str, str], entropy_srcs: List[str] = None, avoid_duplicates: bool = False):
 
-        # in some cases, there is a periodic query to a RIS and a WL is created based on the returned results
-        # in such a case, we may want to avoid the creation of a new WL if it has already been generated
-        # chosen way: delete the existing WL, then create a new one (so that, if the returned results are different,
-        # they are taken in account).
-        if avoid_duplicates:
-            if values.get("AccessionNumber") is None:
-                logger.warning("Setup configured to avoid WL duplicates, but there is no Accession Number!")
-            else:
-                existing_wl = self._orthanc_client.worklists.get_all()
-                for wl in existing_wl:
-                    if wl.get("Tags").get("AccessionNumber") == values.get("AccessionNumber"):
-                        self._orthanc_client.worklists.delete(orthanc_id=wl.get("ID"))
-                        break
-
-
         formatted_values = {}
 
         if not "SOPInstanceUID" in values:
             values["SOPInstanceUID"] = pydicom.uid.generate_uid(entropy_srcs=entropy_srcs)
+        if not "StudyInstanceUID" in values:
+            values["StudyInstanceUID"] = pydicom.uid.generate_uid(entropy_srcs=[values["SOPInstanceUID"]])
+
 
         for field_name, element_type in base_elements:
             self._add_value(formatted_values, values, field_name, element_type)
@@ -165,7 +153,25 @@ class DicomWorklistBuilder:
 
         formatted_values["ScheduledProcedureStepSequence"] = [step]
 
+        existing_wl_ids = []
+        if avoid_duplicates:
+            accession_number = formatted_values.get("AccessionNumber")
+            if not accession_number:
+                logger.warning("Setup configured to avoid WL duplicates, but there is no Accession Number!")
+            else:
+                existing_wl_ids = [
+                    wl["ID"] for wl in self._orthanc_client.worklists.get_all()
+                    if (wl.get("Tags") or {}).get("AccessionNumber") == accession_number
+                ]
+
+        # Snapshot the old IDs before creation.  Validation or API failures must not
+        # remove the existing item, and a reused ID must never delete the replacement.
         wl_id = self._orthanc_client.worklists.create(values=formatted_values)
+        if not isinstance(wl_id, str) or not wl_id:
+            raise ValueError("Worklist creation did not return an Orthanc ID")
+        for existing_wl_id in existing_wl_ids:
+            if existing_wl_id != wl_id:
+                self._orthanc_client.worklists.delete(orthanc_id=existing_wl_id)
         return wl_id
 
     def _add_value(self, output: typing.Dict[str, str], values: typing.Dict[str, str], field_name: str, element_type: DicomElementType):

@@ -1,10 +1,25 @@
-Pending changes
-===============
-- `OrthancForwarder`: added multi-destination forwarding with optional per-destination modes.
-- `OrthancForwarder`: added case-insensitive `StudyDescription` substring and regex filters per destination.
-- `OrthancForwarder`: stable-study processing, retry state, terminal routing state, and heartbeat handling now support long-running filtered workflows.
+v 0.23.1 (fork maintenance)
+==========================
+- Preserve multi-destination forwarding, StudyDescription routing, stable-study processing, and mp-docker workflow tests.
+- Verify forwarding job success before source deletion; persist destination/unit receipts and block uncertain submissions.
+- Use actual Orthanc resource IDs for routing metadata; keep pending jobs recoverable across restart and job-history pruning.
+- Bound HTTP/job waits, clean up workers, recycle idle polling connections, and tie health to processing/API activity.
+- Quiet urllib3 connection-pool warnings in tool CLIs while preserving application failures.
+- Preserve four-column cleaner rules; create worklists before deleting old items and publish backups atomically with verified SFTP host keys.
+- Pin image/runtime/build dependencies and expand Python, container, failure/recovery, and opt-in integration checks.
 
-v 0.22.1
+v 0.23.0
+========
+- BREAKING_CHANGE `OrthancCleaner` can now keep some studies based on the label. Rules file format has changed.
+v 0.22.4
+========
+- Fix in the `DicomWorklistBuilder` (StudyInstanceUID was missing with API way).
+
+v 0.22.3
+========
+- Fix in the `Scheduler` env vars handling.
+
+v 0.22.2
 ========
 - Added a way to avoid duplicates in the `DicomWorklistBuilder`
 

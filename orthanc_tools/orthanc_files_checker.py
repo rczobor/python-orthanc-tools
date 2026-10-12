@@ -18,6 +18,7 @@ import schedule
 import time
 import argparse
 import logging
+from orthanc_tools.helpers.logging_config import configure_logging
 from typing import List
 import os
 from orthanc_api_client import OrthancApiClient, helpers
@@ -89,7 +90,7 @@ if __name__ == '__main__':
     if os.environ.get('VERBOSE_ENABLED'):
         level = logging.DEBUG
 
-    logging.basicConfig(level=level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    configure_logging(level=level)
 
     parser = argparse.ArgumentParser(
         description='Check that every single instance of an Orthanc has actually a file in the storage location.')

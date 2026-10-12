@@ -1,3 +1,5 @@
+import uuid
+import os
 import subprocess
 import time
 
@@ -25,8 +27,11 @@ class TestLabelModifier(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        subprocess.run(["docker", "compose", "down", "-v"], cwd=here/"docker-setup-auth")
-        subprocess.run(["docker", "compose", "up", "-d"], cwd=here/"docker-setup-auth")
+        if os.environ.get("ORTHANC_TEST_ALLOW_DELETE") != "1":
+            raise unittest.SkipTest("Destructive Docker tests require ORTHANC_TEST_ALLOW_DELETE=1 and an isolated daemon")
+        cls.compose_command = ["docker", "compose", "--project-name", f"orthanc-tools-tests-{uuid.uuid4().hex[:12]}"]
+        cls.addClassCleanup(subprocess.run, cls.compose_command + ["down", "--volumes"], cwd=here/"docker-setup-auth", check=True)
+        subprocess.run(cls.compose_command + ["up", "-d"], cwd=here/"docker-setup-auth", check=True)
 
         cls.oa = OrthancApiClient('http://localhost:10042', user='test', pwd='test')
         cls.oa.wait_started()
@@ -162,9 +167,6 @@ class TestLabelModifier(unittest.TestCase):
           ]
         }
 
-    @classmethod
-    def tearDownClass(cls):
-        subprocess.run(["docker", "compose", "down", "-v"], cwd=here/"docker-setup-auth")
 
     @classmethod
     def wait_auth_service_started(cls, url, auth):
@@ -214,7 +216,7 @@ class TestLabelModifier(unittest.TestCase):
         with open(here / "docker-setup-auth/permissions.json", 'w') as f:
             f.write(json.dumps(self.permissions_old))
 
-        subprocess.run(["docker", "compose", "restart", "orthanc-auth-service"], cwd=here / "docker-setup-auth")
+        subprocess.run(self.compose_command + ["restart", "orthanc-auth-service"], cwd=here / "docker-setup-auth")
 
         # waiting for the auth service to be ready to accept queries
         self.wait_auth_service_started(self.auth_url, (self.auth_user, self.auth_pwd))
@@ -241,7 +243,7 @@ class TestLabelModifier(unittest.TestCase):
             f.write(json.dumps(self.permissions_old))
 
         # restart auth service to take file in account
-        subprocess.run(["docker", "compose", "restart", "orthanc-auth-service"], cwd=here / "docker-setup-auth")
+        subprocess.run(self.compose_command + ["restart", "orthanc-auth-service"], cwd=here / "docker-setup-auth")
 
         # waiting for the auth service to be ready to accept queries
         self.wait_auth_service_started(self.auth_url, (self.auth_user, self.auth_pwd))

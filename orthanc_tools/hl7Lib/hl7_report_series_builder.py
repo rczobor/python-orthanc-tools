@@ -1,6 +1,7 @@
 import typing
 import tempfile
 import base64
+from orthanc_api_client import OrthancApiClient
 
 
 class ReportSeriesBuilder:

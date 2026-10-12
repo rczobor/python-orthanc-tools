@@ -1,0 +1,15 @@
+.git
+.venv
+.tox
+.cache
+.idea
+.vscode
+.env
+.env.*
+__pycache__
+**/__pycache__
+*.pyc
+build
+dist
+tests
+demo-setups

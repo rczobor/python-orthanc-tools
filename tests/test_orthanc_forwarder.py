@@ -135,16 +135,17 @@ class TestOrthancForwarderConfiguration(unittest.TestCase):
 
 class TestOrthancForwarderLifecycle(unittest.TestCase):
 
-    def test_heartbeat_is_refreshed_periodically(self):
+    def test_heartbeat_updates_only_on_processing_activity(self):
         forwarder = OrthancForwarder(
             source=mock.MagicMock(),
             destinations=[],
         )
-        stop_event = mock.Mock()
-        stop_event.wait.side_effect = [False, True]
-
+        forwarder._heartbeat_file = "/heartbeat"
         with mock.patch("orthanc_tools.orthanc_forwarder.Path.touch") as touch:
-            forwarder._heartbeat_loop("/heartbeat", stop_event)
+            with mock.patch("orthanc_tools.orthanc_forwarder.time.monotonic", side_effect=[10, 11, 21]):
+                forwarder._heartbeat_progress()
+                forwarder._heartbeat_progress()
+                forwarder._heartbeat_progress()
 
         self.assertEqual(2, touch.call_count)
 
@@ -188,6 +189,7 @@ class TestOrthancForwarderLifecycle(unittest.TestCase):
 class FakeInstancesSet:
     def __init__(self):
         self.id = "study-1"
+        self.study_id = "study-1"
         self.instances_ids = ["instance-1"]
         self.series_ids = []
         self.deleted = False
@@ -204,9 +206,10 @@ class FakeInstancesSet:
         self.filtered.id = f"{self.id}-filtered"
         self.filtered.instances_ids = []
 
-        for instance_id in self.instances_ids:
+        for instance_id in list(self.instances_ids):
             if not instance_filter(mock.sentinel.api_client, instance_id):
                 self.filtered.instances_ids.append(instance_id)
+                self.instances_ids.remove(instance_id)
 
         return self.filtered
 
@@ -322,7 +325,7 @@ class TestOrthancForwarderFilteringBehavior(unittest.TestCase):
         self.assertTrue(instances_set.deleted)
         self.assertEqual(["orthanc-b", "orthanc-c", "orthanc-c"], attempts)
 
-    def test_filtered_only_non_matching_study_runs_hooks_before_terminal_skip(self):
+    def test_filtered_out_instances_are_deleted_without_processing(self):
         instance_filter = mock.Mock(return_value=False)
         instance_processor = mock.Mock()
         source = mock.MagicMock()
@@ -358,10 +361,10 @@ class TestOrthancForwarderFilteringBehavior(unittest.TestCase):
         self.assertNotIn(instances_set.id, forwarder._status)
         self.assertEqual(1, instances_set.filter_calls)
         self.assertTrue(instances_set.filtered.deleted)
-        self.assertEqual(1, instances_set.process_calls)
+        self.assertEqual(0, instances_set.process_calls)
         instance_filter.assert_called_once_with(mock.sentinel.api_client, "instance-1")
-        instance_processor.assert_called_once_with(mock.sentinel.api_client, "instance-1")
-        get_study_description.assert_called_once_with(instances_set)
+        instance_processor.assert_not_called()
+        get_study_description.assert_not_called()
         forward_to_destination.assert_not_called()
 
     def test_terminal_status_is_shared_by_new_forwarder_instances(self):
@@ -438,7 +441,7 @@ class TestOrthancForwarderFilteringBehavior(unittest.TestCase):
                     study_description_pattern="brain"
                 )
             ],
-            polling_interval_in_seconds=0
+            polling_interval_in_seconds=0.01
         )
         instances_set = FakeInstancesSet()
 

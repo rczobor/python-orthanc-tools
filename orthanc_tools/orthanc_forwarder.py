@@ -2,7 +2,9 @@ import argparse
 import csv
 import datetime
 import hashlib
+import json
 import logging
+import math
 import time
 import os
 import re
@@ -15,11 +17,15 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from orthanc_api_client import OrthancApiClient, InstancesSet, ResourceType, ResourceNotFound, exceptions
+from orthanc_api_client.job import Job, JobStatus
+from .helpers.http_client import BoundedOrthancApiClient
+from .helpers.logging_config import configure_logging
 from .orthanc_monitor import ChangeType
 
 logger = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL_SECONDS = 10
 TERMINAL_METADATA_NAME = "4600"
+FORWARDING_METADATA_NAME = "4601"
 
 
 class ForwarderMode(StrEnum):
@@ -112,6 +118,7 @@ class ForwarderInstancesSetStatus:
     sent_to_destinations: List[str] = field(default_factory=list)
     retry_count: int = field(init=False, default=0)
     next_retry: Optional[datetime.datetime] = None
+    pending_jobs: dict[str, str | bool | None] = field(default_factory=dict)
 
 
 class OrthancForwarder:
@@ -160,10 +167,21 @@ class OrthancForwarder:
                  instance_filter = None,                    # a method to filter instances.  Signature: Filter(api_client, instance_id) -> bool (returns True to keep an instance, returns False to delete it)
                  instance_processor = None,                 # a method to process instances before forwarding them.  Signature: Process(api_client, instance_id)
                  on_instances_set_forwarded = None,         # a method that is called each time an InstancesSet has been forwarded to a destination.  Signature: forwarded(instances_set, destination)
-                 on_instances_set_forward_error = None      # a method that is called each time an InstancesSet has failed to be forwarded to a destination.  Signature: forward_error(instances_set, destination, error)
+                 on_instances_set_forward_error = None,     # a method that is called each time an InstancesSet has failed to be forwarded to a destination.  Signature: forward_error(instances_set, destination, error)
+                 forward_timeout_in_seconds: float = 3600,
                  ):
 
+        if worker_threads_count < 1:
+            raise ValueError("worker_threads_count must be positive")
+        if not math.isfinite(polling_interval_in_seconds) or polling_interval_in_seconds <= 0:
+            raise ValueError("polling_interval_in_seconds must be positive")
+        if not math.isfinite(forward_timeout_in_seconds) or forward_timeout_in_seconds <= 0:
+            raise ValueError("forward_timeout_in_seconds must be positive")
         self._source = source
+        self._forward_timeout_in_seconds = forward_timeout_in_seconds
+        self._heartbeat_file = None
+        self._heartbeat_last_touch = 0
+        self._heartbeat_lock = threading.Lock()
         self._destinations = destinations
         destination_retry_keys = [destination.retry_key for destination in destinations]
         duplicate_retry_keys = sorted(
@@ -213,32 +231,24 @@ class OrthancForwarder:
 
     def execute(self):  # runs forever !
         self.wait_orthanc_started()
-        heartbeat_file = os.environ.get("HEARTBEAT_FILE")
-        heartbeat_stop = None
-        heartbeat_thread = None
+        self._heartbeat_file = os.environ.get("HEARTBEAT_FILE")
+        while True:
+            self.handle_all_content()
+            self._heartbeat_progress()
+            time.sleep(self._polling_interval_in_seconds)
 
-        if heartbeat_file:
-            heartbeat_stop = threading.Event()
-            heartbeat_thread = threading.Thread(
-                target=self._heartbeat_loop,
-                args=(heartbeat_file, heartbeat_stop),
-                name="OrthancForwarder heartbeat",
-            )
-            heartbeat_thread.start()
-
-        try:
-            while True:
-                self.handle_all_content()
-                time.sleep(self._polling_interval_in_seconds)
-        finally:
-            if heartbeat_stop:
-                heartbeat_stop.set()
-                heartbeat_thread.join()
-
-    def _heartbeat_loop(self, heartbeat_file, stop_event):
-        Path(heartbeat_file).touch()
-        while not stop_event.wait(HEARTBEAT_INTERVAL_SECONDS):
-            Path(heartbeat_file).touch()
+    def _heartbeat_progress(self):
+        if self._heartbeat_file:
+            with self._heartbeat_lock:
+                now = time.monotonic()
+                if now - self._heartbeat_last_touch >= HEARTBEAT_INTERVAL_SECONDS:
+                    self._heartbeat_last_touch = now
+                    try:
+                        Path(self._heartbeat_file).touch()
+                    except OSError as error:
+                        # Health expires naturally; workers must still drain
+                        # their queue rather than strand the producer.
+                        logger.error("Could not update forwarder heartbeat: %s", error)
 
     def _process_resources(self, worker_id):
         logger.debug(f"Starting Forwarder thread {worker_id}")
@@ -261,16 +271,22 @@ class OrthancForwarder:
                     self._handle_instance(instance_id=resource.resource_id,
                                           api_client=self._source)
 
-                self._resources_to_process.task_done()  # tell the queue the item has been processed
-
             except exceptions.ConnectionError as ex:
-                logger.info(f"Connection error while handling {resource.type} {resource.resource_id}: {str(ex)}")
+                logger.error(f"Connection error while handling {resource.type} {resource.resource_id}: {str(ex)}")
             except Exception as ex:
                 logger.exception(f"Error while handling all {resource.type} {resource.resource_id}: {str(ex)}")
+            finally:
+                if resource is not None:
+                    self._resources_to_process.task_done()
+                    self._heartbeat_progress()
 
         logger.debug(f"Stopping Forwarder thread {worker_id}")
 
     def handle_all_content(self):
+        if isinstance(self._source, BoundedOrthancApiClient):
+            # Orthanc can close idle sockets at the polling boundary. Workers
+            # from the previous pass have joined, so recycling is safe here.
+            self._source.recycle_idle_connections()
         # Fetch work before starting non-daemon threads. If the source API
         # fails, the process can exit and Docker can restart it cleanly.
         if self._trigger == ChangeType.STABLE_STUDY:
@@ -285,29 +301,24 @@ class OrthancForwarder:
         else:
             raise NotImplementedError()
 
-        # create worker threads
-        for thread_id in range(0, self._worker_threads_count):
-            self._worker_threads.append(threading.Thread(
-                target=self._process_resources,
-                name=f"Worker Thread {thread_id}",
-                args=(thread_id,)
-            ))
-
-        # start threads
-        for wt in self._worker_threads:
-            wt.start()
-
-        for resource_id in resource_ids:
-            self._resources_to_process.put(ResourceToForward(type=resource_type, resource_id=resource_id))
-
-        # post one 'empty' exit message per thread to unlock the threads from waiting on the process queue
-        for i in range(0, self._worker_threads_count):
-            self._resources_to_process.put(None)
-
-        for t in self._worker_threads:
-            t.join()
-
-        self._worker_threads = []
+        self._heartbeat_progress()
+        try:
+            for thread_id in range(self._worker_threads_count):
+                worker = threading.Thread(
+                    target=self._process_resources,
+                    name=f"Worker Thread {thread_id}",
+                    args=(thread_id,),
+                )
+                worker.start()
+                self._worker_threads.append(worker)
+            for resource_id in resource_ids:
+                self._resources_to_process.put(ResourceToForward(type=resource_type, resource_id=resource_id))
+        finally:
+            for _ in self._worker_threads:
+                self._resources_to_process.put(None)
+            for worker in self._worker_threads:
+                worker.join()
+            self._worker_threads = []
 
 
     def _thread_execute(self):
@@ -415,9 +426,60 @@ class OrthancForwarder:
             return self._source.instances
         raise NotImplementedError()
 
+    def _resource_id(self, instances_set):
+        if self._trigger == ChangeType.STABLE_STUDY:
+            return self._get_study_id(instances_set)
+        if self._trigger == ChangeType.STABLE_SERIES:
+            return instances_set.series_ids[0]
+        if self._trigger == ChangeType.NEW_INSTANCE:
+            return instances_set.instances_ids[0]
+        raise NotImplementedError()
+
+    def _snapshot_marker(self, instances_set):
+        return hashlib.sha256(repr(sorted(instances_set.instances_ids)).encode()).hexdigest()
+
+    def _load_forwarding_status(self, instances_set, status):
+        content = self._resource_client().get_string_metadata(
+            self._resource_id(instances_set), metadata_name=FORWARDING_METADATA_NAME, default_value="",
+        )
+        if not isinstance(content, str) or not content:
+            return
+        try:
+            record = json.loads(content)
+            if not isinstance(record, dict):
+                raise ValueError("expected an object")
+            if record.get("configuration") != self._terminal_configuration or record.get("snapshot") != self._snapshot_marker(instances_set):
+                return
+            sent = record["sent"]
+            jobs = record["jobs"]
+            if not isinstance(sent, list) or not all(isinstance(key, str) for key in sent):
+                raise ValueError("invalid sent destinations")
+            if not isinstance(jobs, dict) or not all(isinstance(key, str) and (value is None or value is True or isinstance(value, str) and value) for key, value in jobs.items()):
+                raise ValueError("invalid pending jobs")
+            keys = {destination.retry_key for destination in self._destinations}
+            units = {"all", *("series:" + item for item in instances_set.series_ids), *("instance:" + item for item in instances_set.instances_ids)}
+            job_keys = {self._job_key(destination, unit) for destination in self._destinations for unit in units}
+            if not set(sent).issubset(keys) or not set(jobs).issubset(job_keys) or len(set(sent)) != len(sent):
+                raise ValueError("unknown or duplicate destination")
+        except (ValueError, KeyError, TypeError) as error:
+            raise ValueError("Invalid persisted forwarding state; keeping source data") from error
+        status.sent_to_destinations = sent
+        status.pending_jobs = jobs
+
+    def _save_forwarding_status(self, instances_set, status):
+        self._resource_client().set_string_metadata(
+            self._resource_id(instances_set), metadata_name=FORWARDING_METADATA_NAME,
+            content=json.dumps({
+                "configuration": self._terminal_configuration,
+                "snapshot": self._snapshot_marker(instances_set),
+                "sent": status.sent_to_destinations,
+                "jobs": status.pending_jobs,
+            }, sort_keys=True),
+        )
+
     def _is_terminal(self, instances_set: InstancesSet):
         return self._resource_client().get_string_metadata(
-            instances_set.id,
+            self._resource_id(instances_set),
             metadata_name=TERMINAL_METADATA_NAME,
             default_value="",
         ) == self._terminal_marker(instances_set)
@@ -433,14 +495,19 @@ class OrthancForwarder:
     def _mark_as_terminal(self, instances_set: InstancesSet):
         logger.info(f"{instances_set} No eligible destinations matched; keeping source data")
         self._resource_client().set_string_metadata(
-            instances_set.id,
+            self._resource_id(instances_set),
             metadata_name=TERMINAL_METADATA_NAME,
             content=self._terminal_marker(instances_set),
         )
-        del self._status[instances_set.id]
+        self._status.pop(instances_set.id, None)
 
     def forward(self, instances_set, already_sent_to_destinations: List[str]) -> Tuple[List[str], List[str]]:  # returns (sent destinations, eligible destinations)
-        sent_to_destinations = list(already_sent_to_destinations)
+        if instances_set.id not in self._status:
+            status = ForwarderInstancesSetStatus()
+            self._load_forwarding_status(instances_set, status)
+            self._status[instances_set.id] = status
+        sent_to_destinations = list(dict.fromkeys([*self._status[instances_set.id].sent_to_destinations, *already_sent_to_destinations]))
+        already_sent_to_destinations = sent_to_destinations
         eligible_destinations = []
         study_description = None
         study_description_loaded = False
@@ -491,6 +558,13 @@ class OrthancForwarder:
                 )
                 logger.info(f"{instances_set} Sent")
                 sent_to_destinations.append(destination_retry_key)
+                if instances_set.id in self._status:
+                    status = self._status[instances_set.id]
+                    status.sent_to_destinations = list(sent_to_destinations)
+                    for key in list(status.pending_jobs):
+                        if json.loads(key)[0] == destination_retry_key:
+                            del status.pending_jobs[key]
+                    self._save_forwarding_status(instances_set, status)
 
                 if self._on_instances_set_forwarded:
                     self._on_instances_set_forwarded(instances_set=instances_set,
@@ -520,17 +594,20 @@ class OrthancForwarder:
 
     def delete(self, instances_set):
         logger.info(f"{instances_set} Deleting ...")
-        del self._status[instances_set.id]
         instances_set.delete()
+        self._status.pop(instances_set.id, None)
         logger.info(f"{instances_set} Deleting ... Done")
 
     def handle_instances_set(self, instances_set: InstancesSet):
-
+        if not instances_set.instances_ids:
+            return
         if instances_set.id not in self._status:
             if self._is_terminal(instances_set):
                 logger.debug(f"{instances_set} Skipping permanently ineligible content")
                 return
-            self._status[instances_set.id] = ForwarderInstancesSetStatus()
+            status = ForwarderInstancesSetStatus()
+            self._load_forwarding_status(instances_set, status)
+            self._status[instances_set.id] = status
         status = self._status[instances_set.id]
 
         if status.next_retry:  # this is a retry !
@@ -542,6 +619,9 @@ class OrthancForwarder:
 
         # filter
         instances_set = self.filter(instances_set)
+        if not instances_set.instances_ids:
+            self._status.pop(instances_set.id, None)
+            return
 
         # process
         if not status.processed:
@@ -569,52 +649,103 @@ class OrthancForwarder:
 
         logger.info(f"{instances_set} Handling ... Done")
 
+    @staticmethod
+    def _job_key(destination, unit):
+        return json.dumps([destination.retry_key, unit], separators=(",", ":"))
+
+    def _send_and_wait(self, instances_set, destination, unit, submit):
+        status = self._status[instances_set.id]
+        key = self._job_key(destination, unit)
+        if key in status.pending_jobs:
+            if status.pending_jobs[key] is True:
+                return
+            if status.pending_jobs[key] is None:
+                raise exceptions.OrthancApiException(
+                    f"Submission outcome is unknown for {self._resource_id(instances_set)} {unit}; "
+                    f"keeping source data. Reconcile Orthanc jobs with metadata {FORWARDING_METADATA_NAME}."
+                )
+            job = Job(self._source, status.pending_jobs[key])
+        else:
+            # Record intent before POST. A lost response/crash must not cause
+            # automatic replay of a job Orthanc may already have accepted.
+            status.pending_jobs[key] = None
+            try:
+                self._save_forwarding_status(instances_set, status)
+            except Exception:
+                status.pending_jobs.pop(key)
+                raise
+            try:
+                job = submit()
+            except exceptions.OrthancApiException as error:
+                if getattr(error, "http_status_code", None) in (400, 401, 403, 404):
+                    status.pending_jobs.pop(key)
+                    self._save_forwarding_status(instances_set, status)
+                raise
+            if not isinstance(job, Job):
+                raise exceptions.OrthancApiException("Remote pull jobs are not supported by the forwarder")
+            if not isinstance(job.orthanc_id, str) or not job.orthanc_id:
+                raise exceptions.OrthancApiException("Job creation returned no usable Orthanc ID; keeping source data")
+            status.pending_jobs[key] = job.orthanc_id
+            self._save_forwarding_status(instances_set, status)
+
+        deadline = time.monotonic() + self._forward_timeout_in_seconds
+        while True:
+            job.refresh()
+            self._heartbeat_progress()
+            if job.info.status == JobStatus.SUCCESS:
+                # Job history is bounded. Save success rather than relying on
+                # the job ID remaining queryable during a later retry/restart.
+                status.pending_jobs[key] = True
+                self._save_forwarding_status(instances_set, status)
+                return
+            if job.info.status == JobStatus.FAILURE:
+                status.pending_jobs.pop(key)
+                self._save_forwarding_status(instances_set, status)
+                raise exceptions.OrthancApiException(f"Forwarding job {job.orthanc_id} failed")
+            if time.monotonic() >= deadline:
+                # Keep the job receipt so a retry/restart checks this job rather
+                # than starting another send with an uncertain outcome.
+                raise TimeoutError(f"Forwarding job {job.orthanc_id} did not complete before the timeout")
+            time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+
     def _forward_to_destination(self, instances_set: InstancesSet, destination: ForwarderDestination):
         if destination.forwarder_mode == ForwarderMode.DICOM:
-            self._source.modalities.send(
+            self._send_and_wait(instances_set, destination, "all", lambda: self._source.modalities.send_async(
                 target_modality=destination.destination,
-                resources_ids=instances_set.instances_ids
-            )
+                resources_ids=instances_set.instances_ids,
+            ))
         elif destination.forwarder_mode == ForwarderMode.DICOM_SERIES_BY_SERIES:
-            for s in instances_set.series_ids:
-                self._source.modalities.send(
-                    target_modality=destination.destination,
-                    resources_ids=instances_set.get_instances_ids(series_id=s)
+            for series_id in instances_set.series_ids:
+                self._send_and_wait(instances_set, destination, "series:" + series_id,
+                                    lambda: self._source.modalities.send_async(
+                                        target_modality=destination.destination,
+                                        resources_ids=instances_set.get_instances_ids(series_id=series_id),
+                                    ))
+        elif destination.forwarder_mode in (ForwarderMode.DICOM_WEB, ForwarderMode.DICOM_WEB_SERIES_BY_SERIES):
+            for series_id in instances_set.series_ids:
+                split_instances = (
+                    destination.forwarder_mode == ForwarderMode.DICOM_WEB_SERIES_BY_SERIES
+                    and self._source.series.get(series_id).statistics.uncompressed_size > 1024 ** 3
                 )
-        elif destination.forwarder_mode == ForwarderMode.DICOM_WEB:
-            for s in instances_set.series_ids:
-                self._source.dicomweb_servers.send(
-                    target_server=destination.destination,
-                    resources_ids=instances_set.get_instances_ids(series_id=s)
-                )
-        elif destination.forwarder_mode == ForwarderMode.DICOM_WEB_SERIES_BY_SERIES:
-            for s in instances_set.series_ids:
-                series = self._source.series.get(s)
-                if series.statistics.uncompressed_size > 1*1024*1024*1024:
-                    logger.info(f"{instances_set} A series is larger than 1 GB, sending instance by instance")
-                    for i in instances_set.get_instances_ids(series_id=s):
-                        self._source.dicomweb_servers.send(
-                            target_server=destination.destination,
-                            resources_ids=[i]
-                        )
-                else:
-                    self._source.dicomweb_servers.send(
+                groups = [("series:" + series_id, instances_set.get_instances_ids(series_id=series_id))]
+                if split_instances:
+                    groups = [("instance:" + item, [item]) for item in instances_set.get_instances_ids(series_id=series_id)]
+                for unit, instance_ids in groups:
+                    self._send_and_wait(instances_set, destination, unit, lambda: self._source.dicomweb_servers.send_async(
                         target_server=destination.destination,
-                        resources_ids=instances_set.get_instances_ids(series_id=s)
-                    )
+                        resources_ids=instance_ids,
+                    ))
         elif destination.forwarder_mode == ForwarderMode.PEERING:
-            self._source.peers.send(
-                target_peer=destination.destination,
-                resources_ids=instances_set.instances_ids
-            )
-
-        elif destination.forwarder_mode == ForwarderMode.TRANSFER:
-            self._source.transfers.send(
+            self._send_and_wait(instances_set, destination, "all", lambda: self._source.peers.send_async(
                 target_peer=destination.destination,
                 resources_ids=instances_set.instances_ids,
-                resource_type=ResourceType.INSTANCE
-            )
-
+            ))
+        elif destination.forwarder_mode == ForwarderMode.TRANSFER:
+            self._send_and_wait(instances_set, destination, "all", lambda: self._source.transfers.send_async(
+                target_peer=destination.destination,
+                resources_ids=instances_set.instances_ids,
+                resource_type=ResourceType.INSTANCE,
+            ))
         else:
             raise NotImplementedError
 
@@ -735,7 +866,7 @@ if __name__ == '__main__':
     if os.environ.get('VERBOSE_ENABLED'):
         level = logging.DEBUG
 
-    logging.basicConfig(level=level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    configure_logging(level=level)
 
     valid_modes = {m.value for m in ForwarderMode}
 
@@ -756,6 +887,9 @@ if __name__ == '__main__':
     )
     add_parser_argument_w_alias(parser, '--worker_threads_count', type=int, default=1, help='Number of worker threads')
     add_parser_argument_w_alias(parser, '--polling_interval', type=int, default=1, help='Polling interval (in seconds)')
+    add_parser_argument_w_alias(parser, '--http_connect_timeout', type=float, default=5, help='HTTP connect timeout in seconds')
+    add_parser_argument_w_alias(parser, '--http_read_timeout', type=float, default=15, help='HTTP response timeout in seconds')
+    add_parser_argument_w_alias(parser, '--forward_timeout', type=float, default=3600, help='Time to wait for a forwarding job before retrying its status')
     add_parser_argument_w_alias(parser, '--trigger', type=str, default=None, help='NewInstance or StableStudy')
     add_parser_argument_w_alias(parser, '--mode', type=str, default='dicom', help=f'Default forwarder mode. One of: {", ".join(sorted(valid_modes))}')
 
@@ -781,6 +915,9 @@ if __name__ == '__main__':
         raise ValueError("At least one destination must be provided via --destination, DESTINATION, or DESTINATIONS.")
     worker_threads_count = int(os.environ.get("WORKER_THREADS_COUNT", str(args.worker_threads_count)))
     polling_interval_in_seconds = int(os.environ.get("POLLING_INTERVAL", str(args.polling_interval)))
+    http_connect_timeout = float(os.environ.get("HTTP_CONNECT_TIMEOUT", args.http_connect_timeout))
+    http_read_timeout = float(os.environ.get("HTTP_READ_TIMEOUT", args.http_read_timeout))
+    forward_timeout = float(os.environ.get("FORWARD_TIMEOUT", args.forward_timeout))
     trigger = os.environ.get("TRIGGER", args.trigger)
     mode_str = os.environ.get("MODE", args.mode)
 
@@ -797,9 +934,9 @@ if __name__ == '__main__':
 
     # Create API client
     if source_api_key is not None:
-        api_client = OrthancApiClient(source_url, headers={"api-key": source_api_key}, pool_maxsize=max(10, worker_threads_count), pool_block=True)
+        api_client = BoundedOrthancApiClient(source_url, headers={"api-key": source_api_key}, pool_maxsize=max(10, worker_threads_count), pool_block=True, connect_timeout=http_connect_timeout, read_timeout=http_read_timeout)
     else:
-        api_client = OrthancApiClient(source_url, user=source_user, pwd=source_pwd, pool_maxsize=max(10, worker_threads_count), pool_block=True)
+        api_client = BoundedOrthancApiClient(source_url, user=source_user, pwd=source_pwd, pool_maxsize=max(10, worker_threads_count), pool_block=True, connect_timeout=http_connect_timeout, read_timeout=http_read_timeout)
 
     forwarder_destinations = parse_forwarder_destinations(raw_destinations, chosen_mode)
 
@@ -808,7 +945,8 @@ if __name__ == '__main__':
         destinations=forwarder_destinations,
         trigger=trigger,
         worker_threads_count=worker_threads_count,
-        polling_interval_in_seconds=polling_interval_in_seconds
+        polling_interval_in_seconds=polling_interval_in_seconds,
+        forward_timeout_in_seconds=forward_timeout,
     )
 
     forwarder.execute()

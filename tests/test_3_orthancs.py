@@ -1,3 +1,4 @@
+import uuid
 import threading
 import time
 import sys
@@ -37,8 +38,11 @@ class Test3Orthancs(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        subprocess.run(["docker", "compose", "down", "-v"], cwd=here/"docker-setup")
-        subprocess.run(["docker", "compose", "up", "-d"], cwd=here/"docker-setup")
+        if os.environ.get("ORTHANC_TEST_ALLOW_DELETE") != "1":
+            raise unittest.SkipTest("Destructive Docker tests require ORTHANC_TEST_ALLOW_DELETE=1 and an isolated daemon")
+        cls.compose_command = ["docker", "compose", "--project-name", f"orthanc-tools-tests-{uuid.uuid4().hex[:12]}"]
+        cls.addClassCleanup(subprocess.run, cls.compose_command + ["down", "--volumes"], cwd=here/"docker-setup", check=True)
+        subprocess.run(cls.compose_command + ["up", "-d"], cwd=here/"docker-setup", check=True)
 
         cls.oa = OrthancApiClient('http://localhost:10042', user='test', pwd='test')
         cls.oa.wait_started()
@@ -47,9 +51,6 @@ class Test3Orthancs(unittest.TestCase):
         cls.oc = OrthancApiClient('http://localhost:10044', user='test', pwd='test')
         cls.oc.wait_started()
 
-    @classmethod
-    def tearDownClass(cls):
-        subprocess.run(["docker", "compose", "down", "-v"], cwd=here/"docker-setup")
 
     def test_cloner_default(self):
         self.oa.delete_all_content()
@@ -1000,6 +1001,59 @@ class Test3Orthancs(unittest.TestCase):
         # event they both have the required acc nr
         self.assertEqual(len(self.oa.studies.get_all_ids()), 1)
 
+    def test_orthanc_cleaner_with_label_to_keep(self):
+        self.oa.delete_all_content()
+
+        # We are not able to trick Orthanc to modify the `LastUpdate` value
+        # so let's create studies with dates in the future and
+        # a negative retention period
+
+        # populate Orthanc with and "old" future study...
+        populator = OrthancTestDbPopulator(
+            api_client=self.oa,
+            studies_count=1,
+            series_count=1,
+            instances_count=1,
+            from_study_date=datetime.date.today() + datetime.timedelta(weeks=3),
+            to_study_date=datetime.date.today() + datetime.timedelta(weeks=4)
+        )
+        populator.execute()
+
+        # ...and a "recent" future study
+        populator = OrthancTestDbPopulator(
+            api_client=self.oa,
+            studies_count=1,
+            series_count=1,
+            instances_count=1,
+            from_study_date=datetime.date.today() + datetime.timedelta(weeks=14),
+            to_study_date=datetime.date.today() + datetime.timedelta(weeks=16)
+        )
+        populator.execute()
+
+        studies_ids = self.oa.studies.get_all_ids()
+
+        # let's assign the label 'TO_KEEP' to both studies
+        studies_ids = self.oa.studies.get_all_ids()
+        for id in studies_ids:
+            self.oa.studies.add_label(id, "TO_KEEP")
+
+        cleaner = OrthancCleaner(api_client=self.oa, execution_time=None,
+                                 labels_file_path=here / "stimuli/labels2.csv")
+
+        cleaner.execute()
+
+        # we would like to check that both the recent study and the old one are kept
+        # even one of them is older than the retention period
+        self.assertEqual(len(self.oa.studies.get_all_ids()), 2)
+
+        # let's remove the 'TO_KEEP' label and check that only one study (based on the date) is deleted
+        studies_ids = self.oa.studies.get_all_ids()
+        for id in studies_ids:
+            self.oa.studies.delete_label(id, "TO_KEEP")
+
+        cleaner.execute()
+
+        self.assertEqual(len(self.oa.studies.get_all_ids()), 1)
 
     def test_folder_importer(self):
         self.oa.delete_all_content()
@@ -1039,7 +1093,7 @@ class Test3Orthancs(unittest.TestCase):
             self.assertEqual(5, len(self.oa.instances.get_all_ids()))
             with open(errors_path, 'r') as file:
                 lines = file.readlines()
-                self.assertEqual(3, len(lines))
+                self.assertEqual(4, len(lines))
 
     def test_folder_importer_with_errors(self):
         self.oa.delete_all_content()
@@ -1114,7 +1168,7 @@ class Test3Orthancs(unittest.TestCase):
             self.assertEqual(6, len(self.oa.instances.get_all_ids()))
             with open(errors_path, 'r') as file:
                 lines = file.readlines()
-                self.assertEqual(2, len(lines))
+                self.assertEqual(3, len(lines))
 
     def test_orthanc_syncher_as_a_migrator(self):
         self.oa.delete_all_content()
@@ -1237,14 +1291,15 @@ class Test3Orthancs(unittest.TestCase):
 
         # delete the file from the storage
         subprocess.run(
-            [
-                "docker",
+            self.compose_command + [
                 "exec",
-                "docker-setup-orthanc-a-1",
+                "-T",
+                "orthanc-a",
                 "sh",
                 "-c",
                 "find /var/lib/orthanc/db/ -mindepth 1 -depth -type d -name '??' -exec rm -rf {} +",
             ],
+            cwd=here / "docker-setup",
             check=True,
         )
 

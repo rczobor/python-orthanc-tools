@@ -140,7 +140,26 @@ environment:
 ```
 
 `DESTINATION` remains supported for a single destination. `MODE` sets the default mode. When
-`HEARTBEAT_FILE` is set, the forwarder periodically touches that file for a container health check.
+`HEARTBEAT_FILE` is set, successful source polling, worker activity, and forwarding-job polling
+refresh that file for a container health check. It measures process/API responsiveness; monitor
+retained backlog separately to detect persistent destination failures.
+
+Forwarding waits for an Orthanc job to report `Success` before deleting the source snapshot.
+Destination successes and pending jobs are persisted in resource metadata `4601`; no-match
+routing uses metadata `4600`. A restart resumes known jobs and skips confirmed destinations.
+An uncertain job submission retains the source for operator reconciliation rather than replaying
+the request automatically. See [maintenance and recovery](docs/maintenance.md).
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `HTTP_CONNECT_TIMEOUT` / `--http-connect-timeout` | 5 seconds | Bound source connection attempts. |
+| `HTTP_READ_TIMEOUT` / `--http-read-timeout` | 15 seconds | Bound each source HTTP response wait. |
+| `FORWARD_TIMEOUT` / `--forward-timeout` | 3600 seconds | Bound one job wait; retries keep checking the existing job. |
+
+Tool CLIs keep `urllib3.connectionpool` at `ERROR` so HTTP retry warnings do not bury application
+logs. Requests still retry safe operations, and exhausted failures remain visible in tool logs.
+Set `URLLIB3_LOG_LEVEL=WARNING` or `DEBUG` explicitly for transport diagnostics. Library imports
+leave the embedding application's logging configuration alone.
 
 If no configured destination matches a study, the source data is retained. The skip is persisted in
 Orthanc metadata to avoid an endless retry loop and is reconsidered when the study or routing

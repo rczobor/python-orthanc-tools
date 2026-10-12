@@ -1,0 +1,49 @@
+# Disposable mp-docker reproduction: PostgreSQL index, filesystem storage,
+# short HTTP keep-alive, and the production Orthanc/PostgreSQL image versions.
+services:
+  orthanc-a:
+    image: orthancteam/orthanc:26.9.1@sha256:d2705f2c56547e55ce9bc2250fd22d05d326493b3f3d9fa191ecb7db8ca6b5a2
+    ports: !reset []
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRESQL_PLUGIN_ENABLED: "true"
+      ORTHANC__POSTGRESQL__ENABLE_INDEX: "true"
+      ORTHANC__POSTGRESQL__ENABLE_STORAGE: "false"
+      ORTHANC__POSTGRESQL__HOST: postgres
+      ORTHANC__POSTGRESQL__PORT: "5432"
+      ORTHANC__POSTGRESQL__DATABASE: orthanc
+      ORTHANC__POSTGRESQL__USERNAME: orthanc
+      ORTHANC__POSTGRESQL__PASSWORD: maintenance-test-only
+      ORTHANC__KEEP_ALIVE_TIMEOUT: "1"
+      ORTHANC__OVERWRITE_INSTANCES: "false"
+
+  orthanc-b:
+    image: orthancteam/orthanc:26.9.1@sha256:d2705f2c56547e55ce9bc2250fd22d05d326493b3f3d9fa191ecb7db8ca6b5a2
+    ports: !reset []
+    environment:
+      ORTHANC__KEEP_ALIVE_TIMEOUT: "1"
+
+  orthanc-c:
+    image: orthancteam/orthanc:26.9.1@sha256:d2705f2c56547e55ce9bc2250fd22d05d326493b3f3d9fa191ecb7db8ca6b5a2
+    ports: !reset []
+    environment:
+      ORTHANC__KEEP_ALIVE_TIMEOUT: "1"
+
+  postgres:
+    image: postgres:17.11-trixie@sha256:2d2b8998d31037bf721cfdf764d76ba74171b4fab3431b7f72c27c56ddbdf9e3
+    environment:
+      POSTGRES_DB: orthanc
+      POSTGRES_USER: orthanc
+      POSTGRES_PASSWORD: maintenance-test-only
+    volumes:
+      - postgres-index:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orthanc -d orthanc"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  postgres-index:

@@ -5,15 +5,17 @@ from orthanc_tools import Hl7ReportParser, ReportSeriesBuilder, Hl7OruReportMsgH
 from orthanc_api_client import OrthancApiClient
 
 import logging
+from orthanc_tools.helpers.logging_config import configure_logging
 
 # this starts an hl7 server
 if __name__ == "__main__":
+    level = logging.INFO
 
 
     if os.environ.get('VERBOSE_ENABLED'):
         level = logging.DEBUG
 
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    configure_logging(level=level)
 
     # build command line parser
     parser = argparse.ArgumentParser(description = 'Create a HL7 server (folder and orthanc params are mutually exclusive)')
