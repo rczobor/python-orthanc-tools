@@ -65,6 +65,16 @@ class TestWorklistReplacement(unittest.TestCase):
         self.assertEqual("old-one", result)
         self.worklists.delete.assert_called_once_with(orthanc_id="old-two")
 
+    def test_deterministic_uids_are_distinct_and_repeatable(self):
+        self.builder.generate(dict(self.values), entropy_srcs=["maintenance-order"])
+        first = self.worklists.create.call_args.kwargs["values"]
+        self.builder.generate(dict(self.values), entropy_srcs=["maintenance-order"])
+        second = self.worklists.create.call_args.kwargs["values"]
+
+        self.assertNotEqual(first["SOPInstanceUID"], first["StudyInstanceUID"])
+        self.assertEqual(first["SOPInstanceUID"], second["SOPInstanceUID"])
+        self.assertEqual(first["StudyInstanceUID"], second["StudyInstanceUID"])
+
     def test_invalid_creation_response_preserves_existing_worklists(self):
         self.worklists.create.return_value = None
 

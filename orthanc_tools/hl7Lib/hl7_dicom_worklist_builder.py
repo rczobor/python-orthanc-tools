@@ -141,7 +141,7 @@ class DicomWorklistBuilder:
         if not "SOPInstanceUID" in values:
             values["SOPInstanceUID"] = pydicom.uid.generate_uid(entropy_srcs=entropy_srcs)
         if not "StudyInstanceUID" in values:
-            values["StudyInstanceUID"] = pydicom.uid.generate_uid(entropy_srcs=entropy_srcs)  # set a default StudyInstanceUID.  It might be overriden from the dwl object
+            values["StudyInstanceUID"] = pydicom.uid.generate_uid(entropy_srcs=[values["SOPInstanceUID"]])
 
 
         for field_name, element_type in base_elements:
