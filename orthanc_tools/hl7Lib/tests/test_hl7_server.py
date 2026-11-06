@@ -97,9 +97,9 @@ class TestHl7Server(unittest.TestCase):
             with MLLPClient('localhost', port_number) as client:
 
                 # same test by constructing the message another way
-                MSH = hl7.Segment(hl7Lib.HL7_FIELD_SEPARATOR, [hl7.Field(hl7Lib.HL7_ALL_SEPARATORS[1], ['MSH'])])
-                PID = hl7.Segment(hl7Lib.HL7_FIELD_SEPARATOR, [hl7.Field(hl7Lib.HL7_ALL_SEPARATORS[1], ['PID'])])
-                OBR = hl7.Segment(hl7Lib.HL7_FIELD_SEPARATOR, [hl7.Field(hl7Lib.HL7_ALL_SEPARATORS[1], ['OBR'])])
+                MSH = hl7.Segment(hl7Lib.HL7_FIELD_SEPARATOR, [hl7.Field(hl7Lib.HL7_ALL_SEPARATORS[2], ['MSH'])])
+                PID = hl7.Segment(hl7Lib.HL7_FIELD_SEPARATOR, [hl7.Field(hl7Lib.HL7_ALL_SEPARATORS[2], ['PID'])])
+                OBR = hl7.Segment(hl7Lib.HL7_FIELD_SEPARATOR, [hl7.Field(hl7Lib.HL7_ALL_SEPARATORS[2], ['OBR'])])
                 hl7_message = hl7.Message(b'\x0d'.decode(), [MSH, PID, OBR])
 
                 # MSH reference: https://www.hl7.org/documentcenter/public_temp_1D5D9D29-1C23-BA17-0CDBD1CAA8621C11/wg/conf/HL7MSH.htm
@@ -132,7 +132,7 @@ class TestHl7Server(unittest.TestCase):
                 hl7_message['OBR.F33.R1'] = ''  # 'TODO'        # principalResultInterpreter TODO: define with CHR
 
                 obxIndex = 1
-                OBX = hl7.Segment(hl7Lib.HL7_FIELD_SEPARATOR, [hl7.Field(hl7Lib.HL7_ALL_SEPARATORS[1], ['OBX'])])
+                OBX = hl7.Segment(hl7Lib.HL7_FIELD_SEPARATOR, [hl7.Field(hl7Lib.HL7_ALL_SEPARATORS[2], ['OBX'])])
                 hl7_message.append(OBX)
                 hl7_message['OBX{0}.F1.R1'.format(obxIndex)] = '1'  # Set ID
                 hl7_message['OBX{0}.F2.R1'.format(obxIndex)] = 'ED'  # FT,ST,TX = text, ED = encapsulated data, RP = Reference pointer to a file

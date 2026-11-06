@@ -11,6 +11,42 @@ tag and its `org.opencontainers.image.revision` label to identify the deployed s
 The Dockerfile pins the Python image digest. Update these pins deliberately, run the regression
 and integration checks below, and audit the resulting runtime before releasing an image.
 
+### Dependency review: 2026-11-07
+
+The November refresh updates certifi to 2026.10.23 for the critical
+[compromised emSign CA advisory](https://github.com/advisories/GHSA-6q48-6c7w-9gw2).
+Python 3.14.10 also blocks the compromised intermediate keys and fixes
+`tarfile.tar_filter` traversal (CVE-2026-115557 and CVE-2026-114583). See the
+[Python release notes](https://www.python.org/downloads/release/python-31410/).
+Setuptools 84.2.1 fixes the Windows legacy wheel-installation path escape
+([GHSA-xmj3-9gf7-h52w](https://github.com/advisories/GHSA-xmj3-9gf7-h52w)).
+Pip 26.3 replaces the base image's vulnerable vendored urllib3 and msgpack copies;
+updating the application's own packages alone does not replace pip's copies.
+
+Compatible maintenance updates include Paramiko 5.1.0 (RSA SHA-2 signing and
+agent-key fixes, plus hybrid post-quantum key exchange), schedule 1.2.2 (timezone
+scheduling fixes), hl7 0.4.5 (parser/MLLP fixes), blessed 1.52.0, wcwidth 0.9.4,
+and pycparser 3.12. StrEnum 0.5.0 is deferred because its pre-1.0 minor update
+has no identified security need. The other runtime/build pins were current.
+
+Both lockfiles pass pip-audit with no known advisories at this review date.
+The finished image was also scanned with Trivy 0.76.2 and its 2026-11-06 database.
+This is **not a clean bill of health for the whole image**: Debian 13 findings,
+including high and critical severities, remain without fixed versions in that
+database. Reducing the full Debian build image to a tested runtime image is a
+separate hardening opportunity. Trivy also reports setuptools 70.3.0 from pip's
+vendored metadata; pip contains the `pkg_resources` subset, not the vulnerable
+`wheel.py` or `package_index.py` implementations. Installed setuptools is 84.2.1.
+
+Recent CPython advisories also need follow-up when a patched 3.14 image ships:
+[CVE-2026-116566](https://www.cve.org/CVERecord?id=CVE-2026-116566) (embedded NULs
+in `socket.getaddrinfo`) and
+[CVE-2026-103995](https://www.cve.org/CVERecord?id=CVE-2026-103995) (lenient HTTP
+framing). The 3.14.10-only FIPS regression
+[CVE-2026-119170](https://www.cve.org/CVERecord?id=CVE-2026-119170) affects OpenSSL
+FIPS mode; that mode was verified disabled in this release image. Reassess this
+if deploying with different OpenSSL configuration.
+
 ```sh
 docker build --build-arg VCS_REF="$(git rev-parse HEAD)" -t python-orthanc-tools:maintenance .
 ```

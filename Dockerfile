@@ -1,4 +1,4 @@
-FROM python:3.14@sha256:b9767f56a1cc620aa72d38cc3557d26412e38a4597c92953476136b78894ccbd
+FROM python:3.14@sha256:d18055009f327b22993de14458aa5a6bac032cdf459ea2a2e9bbdc3d3d49e4fb
 
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.source="https://github.com/rczobor/python-orthanc-tools" \
