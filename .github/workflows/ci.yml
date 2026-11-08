@@ -59,18 +59,25 @@ jobs:
         run: |
           docker compose --project-name mp-forwarder-ci -f tests/docker-setup/docker-compose.yml -f tests/docker-setup/maintenance.yml up -d
 
+          # Mirrors the production hardening and health command.
           docker run -d \
             --name mp-forwarder-ci-forwarder \
             --network mp-forwarder-ci_default \
+            --init \
+            --read-only \
+            --tmpfs /tmp \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
             -e SOURCE_URL=http://orthanc-a:8042 \
             -e SOURCE_USER=test \
             -e SOURCE_PWD=test \
             -e DESTINATIONS=orthanc-b:peering,orthanc-c:dicom:substring:RTG \
             -e TRIGGER=StableStudy \
-            -e WORKER_THREADS_COUNT=6 \
+            -e WORKER_THREADS_COUNT=3 \
             -e POLLING_INTERVAL=1 \
             -e HEARTBEAT_FILE=/tmp/forwarder-heartbeat \
-            --health-cmd 'test -f /tmp/forwarder-heartbeat && find /tmp/forwarder-heartbeat -mmin -1 | grep -q .' \
+            -e FAILURE_ALERT_AFTER=1800 \
+            --health-cmd 'find /tmp/forwarder-heartbeat -mmin -1 -print -quit | grep -q . && grep -q "\"status\": \"ok\"" /tmp/forwarder-heartbeat' \
             --health-interval 2s \
             --health-timeout 2s \
             --health-retries 15 \

@@ -137,12 +137,35 @@ environment:
   DESTINATIONS: archive:dicom,rtg:dicom:substring:RTG
   TRIGGER: StableStudy
   HEARTBEAT_FILE: /tmp/forwarder-heartbeat
+  FAILURE_ALERT_AFTER: "1800"
+healthcheck:
+  test:
+    - CMD-SHELL
+    - >-
+      find /tmp/forwarder-heartbeat -mmin -2 -print -quit | grep -q . &&
+      grep -q '"status": "ok"' /tmp/forwarder-heartbeat
 ```
 
 `DESTINATION` remains supported for a single destination. `MODE` sets the default mode. When
 `HEARTBEAT_FILE` is set, successful source polling, worker activity, and forwarding-job polling
-refresh that file for a container health check. It measures process/API responsiveness; monitor
-retained backlog separately to detect persistent destination failures.
+rewrite that file at most every 10 seconds. Its age measures process/API responsiveness. Its JSON
+content reports delivery:
+
+```json
+{"failing_resources": 1, "failure_alert_after_seconds": 1800, "oldest_failure_seconds": 1830,
+ "source_resources": 3, "status": "failing", "updated_at": "2026-11-08T17:20:39+00:00"}
+```
+
+A resource is failing from its first failed attempt until it is forwarded, becomes ineligible, or
+leaves the source. `status` becomes `failing` once the oldest failure is older than
+`FAILURE_ALERT_AFTER` seconds, so the health check above turns a persistent destination outage or an
+uncertain submission into an unhealthy container. The default `0` never reports `failing`. After a
+destination recovers, the status clears at the resource's next retry, up to 60 minutes later. Failure
+state is kept in memory: restarting the forwarder retries at once but also restarts the alert clock.
+
+The container image runs as the unprivileged UID 10001 on a slim Python base. Its only writes are
+to the heartbeat, so it works with a read-only root filesystem and a tmpfs `/tmp`. Set `user:` when
+another tool must write to root-owned mounts.
 
 Forwarding waits for an Orthanc job to report `Success` before deleting the source snapshot.
 Destination successes and pending jobs are persisted in resource metadata `4601`; no-match
@@ -155,6 +178,13 @@ the request automatically. See [maintenance and recovery](docs/maintenance.md).
 | `HTTP_CONNECT_TIMEOUT` / `--http-connect-timeout` | 5 seconds | Bound source connection attempts. |
 | `HTTP_READ_TIMEOUT` / `--http-read-timeout` | 15 seconds | Bound each source HTTP response wait. |
 | `FORWARD_TIMEOUT` / `--forward-timeout` | 3600 seconds | Bound one job wait; retries keep checking the existing job. |
+| `FAILURE_ALERT_AFTER` / `--failure-alert-after` | 0 (disabled) | Report a `failing` heartbeat status after this many seconds of failure. |
+
+A failed resource retries after 1, 2, 5, 30 and then every 60 minutes. With `StableStudy`, until its
+retry is due each pass reads only the study itself; new instances in the study are handled at once. Log lines name the
+Orthanc resource ID and destination, and a failed job includes Orthanc's error description and
+details. Orthanc keeps only `JobsHistorySize` finished jobs (default 10), so a forwarder source
+should keep a larger history, for example `"JobsHistorySize": 500`, for investigation.
 
 Tool CLIs keep `urllib3.connectionpool` at `ERROR` so HTTP retry warnings do not bury application
 logs. Requests still retry safe operations, and exhausted failures remain visible in tool logs.

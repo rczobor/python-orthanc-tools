@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -140,14 +141,18 @@ class TestOrthancForwarderLifecycle(unittest.TestCase):
             source=mock.MagicMock(),
             destinations=[],
         )
-        forwarder._heartbeat_file = "/heartbeat"
-        with mock.patch("orthanc_tools.orthanc_forwarder.Path.touch") as touch:
-            with mock.patch("orthanc_tools.orthanc_forwarder.time.monotonic", side_effect=[10, 11, 21]):
-                forwarder._heartbeat_progress()
-                forwarder._heartbeat_progress()
-                forwarder._heartbeat_progress()
+        now = [10]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            forwarder._heartbeat_file = os.path.join(temp_dir, "heartbeat")
+            with mock.patch("orthanc_tools.orthanc_forwarder.os.replace", wraps=os.replace) as replace:
+                with mock.patch("orthanc_tools.orthanc_forwarder.time.monotonic", side_effect=lambda: now[0]):
+                    forwarder._heartbeat_progress()
+                    now[0] = 11
+                    forwarder._heartbeat_progress()
+                    now[0] = 21
+                    forwarder._heartbeat_progress()
 
-        self.assertEqual(2, touch.call_count)
+        self.assertEqual(2, replace.call_count)
 
     def test_execute_updates_heartbeat_after_successful_pass(self):
         forwarder = OrthancForwarder(
@@ -168,7 +173,10 @@ class TestOrthancForwarderLifecycle(unittest.TestCase):
                             with self.assertRaisesRegex(RuntimeError, "stop"):
                                 forwarder.execute()
 
-            self.assertTrue(os.path.isfile(heartbeat_path))
+            with open(heartbeat_path) as heartbeat:
+                status = json.load(heartbeat)
+            self.assertEqual("ok", status["status"])
+            self.assertEqual(0, status["failing_resources"])
 
     def test_source_failure_does_not_leave_worker_threads_running(self):
         source = mock.MagicMock()

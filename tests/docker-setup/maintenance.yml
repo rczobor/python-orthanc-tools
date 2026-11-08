@@ -2,7 +2,7 @@
 # short HTTP keep-alive, and the production Orthanc/PostgreSQL image versions.
 services:
   orthanc-a:
-    image: orthancteam/orthanc:26.9.1@sha256:d2705f2c56547e55ce9bc2250fd22d05d326493b3f3d9fa191ecb7db8ca6b5a2
+    image: orthancteam/orthanc:26.11.0@sha256:06b8baab0c63cd58de5474a74b64096a82ea3f7eab2aa471e217cc48c9ae11bf
     ports: !reset []
     depends_on:
       postgres:
@@ -20,19 +20,19 @@ services:
       ORTHANC__OVERWRITE_INSTANCES: "false"
 
   orthanc-b:
-    image: orthancteam/orthanc:26.9.1@sha256:d2705f2c56547e55ce9bc2250fd22d05d326493b3f3d9fa191ecb7db8ca6b5a2
+    image: orthancteam/orthanc:26.11.0@sha256:06b8baab0c63cd58de5474a74b64096a82ea3f7eab2aa471e217cc48c9ae11bf
     ports: !reset []
     environment:
       ORTHANC__KEEP_ALIVE_TIMEOUT: "1"
 
   orthanc-c:
-    image: orthancteam/orthanc:26.9.1@sha256:d2705f2c56547e55ce9bc2250fd22d05d326493b3f3d9fa191ecb7db8ca6b5a2
+    image: orthancteam/orthanc:26.11.0@sha256:06b8baab0c63cd58de5474a74b64096a82ea3f7eab2aa471e217cc48c9ae11bf
     ports: !reset []
     environment:
       ORTHANC__KEEP_ALIVE_TIMEOUT: "1"
 
   postgres:
-    image: postgres:17.11-trixie@sha256:2d2b8998d31037bf721cfdf764d76ba74171b4fab3431b7f72c27c56ddbdf9e3
+    image: postgres:17.11-trixie@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
     environment:
       POSTGRES_DB: orthanc
       POSTGRES_USER: orthanc

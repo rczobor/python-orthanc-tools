@@ -1,5 +1,4 @@
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from orthanc_api_client import ChangeType
@@ -11,8 +10,8 @@ class FakeStudies:
     def __init__(self, is_stable):
         self.is_stable = is_stable
 
-    def get(self, study_id):
-        return SimpleNamespace(is_stable=self.is_stable)
+    def get_json(self, study_id):
+        return {"IsStable": self.is_stable, "LastUpdate": "20261108T120000"}
 
 
 class FakeApiClient:

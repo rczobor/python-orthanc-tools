@@ -121,6 +121,18 @@ class ForwarderInstancesSetStatus:
     pending_jobs: dict[str, str | bool | None] = field(default_factory=dict)
 
 
+@dataclass
+class ResourceFailure:
+    # Monotonic times. Tracked per source resource rather than per instances
+    # set so retries can be skipped before listing the resource's instances.
+    first_failed_at: float
+    retry_at: float = 0
+    attempts: int = 0
+    # The study's LastUpdate during the failed attempt. None waits regardless
+    # of new content, e.g. after an unexpected exception.
+    version: Optional[str] = None
+
+
 class OrthancForwarder:
     """
     Forwards everything Orthanc receives to another Orthanc peer, a DICOM modality or DicomWeb server.
@@ -169,6 +181,7 @@ class OrthancForwarder:
                  on_instances_set_forwarded = None,         # a method that is called each time an InstancesSet has been forwarded to a destination.  Signature: forwarded(instances_set, destination)
                  on_instances_set_forward_error = None,     # a method that is called each time an InstancesSet has failed to be forwarded to a destination.  Signature: forward_error(instances_set, destination, error)
                  forward_timeout_in_seconds: float = 3600,
+                 failure_alert_after_in_seconds: float = 0,  # 0 disables the "failing" heartbeat status
                  ):
 
         if worker_threads_count < 1:
@@ -177,10 +190,17 @@ class OrthancForwarder:
             raise ValueError("polling_interval_in_seconds must be positive")
         if not math.isfinite(forward_timeout_in_seconds) or forward_timeout_in_seconds <= 0:
             raise ValueError("forward_timeout_in_seconds must be positive")
+        if not math.isfinite(failure_alert_after_in_seconds) or failure_alert_after_in_seconds < 0:
+            raise ValueError("failure_alert_after_in_seconds must not be negative")
         self._source = source
         self._forward_timeout_in_seconds = forward_timeout_in_seconds
+        self._failure_alert_after_in_seconds = failure_alert_after_in_seconds
+        self._failures: dict[str, ResourceFailure] = {}
+        self._failures_lock = threading.Lock()
+        self._listed_resources_count = None
         self._heartbeat_file = None
         self._heartbeat_last_touch = 0
+        self._heartbeat_status = "ok"
         self._heartbeat_lock = threading.Lock()
         self._destinations = destinations
         destination_retry_keys = [destination.retry_key for destination in destinations]
@@ -243,12 +263,80 @@ class OrthancForwarder:
                 now = time.monotonic()
                 if now - self._heartbeat_last_touch >= HEARTBEAT_INTERVAL_SECONDS:
                     self._heartbeat_last_touch = now
+                    status = self.delivery_status()
+                    self._log_status_change(status)
                     try:
-                        Path(self._heartbeat_file).touch()
+                        # Replace atomically so a health check never reads a
+                        # partially written status.
+                        temporary = Path(f"{self._heartbeat_file}.tmp")
+                        temporary.write_text(json.dumps(status, sort_keys=True) + "\n")
+                        os.replace(temporary, self._heartbeat_file)
                     except OSError as error:
                         # Health expires naturally; workers must still drain
                         # their queue rather than strand the producer.
                         logger.error("Could not update forwarder heartbeat: %s", error)
+
+    def delivery_status(self) -> dict:
+        """Summarizes resources whose forwarding has failed and not yet succeeded.
+
+        `status` is "failing" once the oldest failure is older than
+        `failure_alert_after_in_seconds` (when that alert is enabled).
+        """
+        now = time.monotonic()
+        with self._failures_lock:
+            first_failures = [failure.first_failed_at for failure in self._failures.values()]
+        oldest = round(now - min(first_failures)) if first_failures else 0
+        alert_after = self._failure_alert_after_in_seconds
+        failing = bool(first_failures) and alert_after > 0 and oldest >= alert_after
+        return {
+            "status": "failing" if failing else "ok",
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+            "source_resources": self._listed_resources_count,
+            "failing_resources": len(first_failures),
+            "oldest_failure_seconds": oldest,
+            "failure_alert_after_seconds": alert_after,
+        }
+
+    def _log_status_change(self, status):
+        if status["status"] == self._heartbeat_status:
+            return
+        self._heartbeat_status = status["status"]
+        if status["status"] == "failing":
+            logger.error(
+                f"Forwarding has failed for {status['failing_resources']} resource(s); the oldest failure is "
+                f"{status['oldest_failure_seconds']} seconds old. The heartbeat now reports a failing status."
+            )
+        else:
+            logger.info("Forwarding failures have cleared; the heartbeat reports an ok status again")
+
+    def _record_failure(self, resource_id: str, retry_in_seconds: Optional[float] = None):
+        now = time.monotonic()
+        with self._failures_lock:
+            failure = self._failures.setdefault(resource_id, ResourceFailure(first_failed_at=now))
+            if retry_in_seconds is None:
+                retry_in_seconds = self.retry_intervals[min(failure.attempts, len(self.retry_intervals) - 1)]
+            failure.attempts += 1
+            failure.retry_at = now + retry_in_seconds
+            failure.version = None
+
+    def _clear_failure(self, resource_id: str):
+        with self._failures_lock:
+            self._failures.pop(resource_id, None)
+
+    def _is_waiting_for_retry(self, resource_id: str, version: Optional[str]) -> bool:
+        with self._failures_lock:
+            failure = self._failures.get(resource_id)
+            if failure is None or time.monotonic() >= failure.retry_at:
+                return False
+            return failure.version is None or failure.version == version
+
+    def _remember_failed_version(self, resource_id: str, version: Optional[str]):
+        # Called after an attempt that returned normally. If the resource is
+        # still failing, wait for its retry unless its content changes again.
+        with self._failures_lock:
+            failure = self._failures.get(resource_id)
+            if failure is not None:
+                failure.version = version
 
     def _process_resources(self, worker_id):
         logger.debug(f"Starting Forwarder thread {worker_id}")
@@ -272,9 +360,11 @@ class OrthancForwarder:
                                           api_client=self._source)
 
             except exceptions.ConnectionError as ex:
+                self._record_failure(resource.resource_id)
                 logger.error(f"Connection error while handling {resource.type} {resource.resource_id}: {str(ex)}")
             except Exception as ex:
-                logger.exception(f"Error while handling all {resource.type} {resource.resource_id}: {str(ex)}")
+                self._record_failure(resource.resource_id)
+                logger.exception(f"Error while handling {resource.type} {resource.resource_id}: {str(ex)}")
             finally:
                 if resource is not None:
                     self._resources_to_process.task_done()
@@ -300,6 +390,14 @@ class OrthancForwarder:
             resource_ids = self._source.instances.get_all_ids()
         else:
             raise NotImplementedError()
+
+        # No workers are running here, so failures of resources that left the
+        # source (forwarded, deleted by an operator...) can be dropped safely.
+        listed = set(resource_ids)
+        with self._failures_lock:
+            for resource_id in [key for key in self._failures if key not in listed]:
+                del self._failures[resource_id]
+        self._listed_resources_count = len(listed)
 
         self._heartbeat_progress()
         try:
@@ -355,20 +453,26 @@ class OrthancForwarder:
         self.stop()
 
     def _handle_study(self, study_id: str, api_client):
-        if self._trigger == ChangeType.STABLE_STUDY and not self._is_study_stable(study_id, api_client):
+        try:
+            study = api_client.studies.get_json(study_id)
+        except ResourceNotFound:
+            logger.debug(f"Study {study_id} disappeared before it could be handled")
+            return
+        if self._trigger == ChangeType.STABLE_STUDY and not study.get("IsStable"):
             logger.debug(f"Study {study_id} is not stable yet")
+            return
+
+        # A failed study is polled every pass. Listing its instances again
+        # costs one request per series, so wait for the retry unless new
+        # content arrived since the failed attempt.
+        version = study.get("LastUpdate")
+        if self._is_waiting_for_retry(study_id, version):
+            logger.debug(f"Study {study_id} is waiting for a retry")
             return
 
         instances_set = InstancesSet.from_study(api_client=api_client, study_id=study_id)
         self.handle_instances_set(instances_set)
-
-    def _is_study_stable(self, study_id: str, api_client) -> bool:
-        try:
-            study = api_client.studies.get(study_id)
-            return study.is_stable
-        except ResourceNotFound:
-            logger.debug(f"Study {study_id} disappeared before it could be handled")
-            return False
+        self._remember_failed_version(study_id, version)
 
     def _handle_series(self, series_id: str, api_client):
         instances_set = InstancesSet.from_series(api_client=api_client, series_id=series_id)
@@ -383,7 +487,7 @@ class OrthancForwarder:
         # By default, all instances not satisfying the filter are deleted
         if self._instance_filter:
             filtered = instances_set.filter_instances(self._instance_filter)
-            logger.info(f"{instances_set} Deleting {len(filtered.instances_ids)} instances / {len(filtered.series_ids)} series that have been filtered out")
+            logger.info(f"{self._describe(instances_set)} Deleting {len(filtered.instances_ids)} instances / {len(filtered.series_ids)} series that have been filtered out")
             filtered.delete()
 
         return instances_set
@@ -393,29 +497,40 @@ class OrthancForwarder:
 
         if self._instance_processor:
             try:
-                logger.info(f"{instances_set} Processing ...")
+                logger.info(f"{self._describe(instances_set)} Processing ...")
 
                 instances_set.process_instances(self._instance_processor)
 
-                logger.info(f"{instances_set} Processing ... done")
+                logger.info(f"{self._describe(instances_set)} Processing ... done")
             except exceptions.OrthancApiException as ex:
-                logger.error(f"{instances_set} Error while processing: {str(ex)}")
+                logger.error(f"{self._describe(instances_set)} Error while processing: {str(ex)}")
                 return False
             except Exception as ex:
-                logger.error(f"{instances_set} Error while processing: {str(ex)}", exc_info=True)
+                logger.error(f"{self._describe(instances_set)} Error while processing: {str(ex)}", exc_info=True)
                 return False
 
         return True
 
     def _schedule_retry(self, instances_set: InstancesSet, status: ForwarderInstancesSetStatus):
         retry_count = status.retry_count
-        next_retry = datetime.datetime.now() + datetime.timedelta(
-            seconds=self.retry_intervals[min(retry_count, len(self.retry_intervals) - 1)]
-        )
-        logger.info(f"{instances_set} Failed, will retry at {next_retry}")
+        retry_in_seconds = self.retry_intervals[min(retry_count, len(self.retry_intervals) - 1)]
+        next_retry = datetime.datetime.now() + datetime.timedelta(seconds=retry_in_seconds)
+        logger.info(f"{self._describe(instances_set)} Failed, will retry at {next_retry}")
 
         status.next_retry = next_retry
         status.retry_count = retry_count + 1
+        self._record_failure(self._resource_id(instances_set), retry_in_seconds)
+
+    def _describe(self, instances_set: InstancesSet) -> str:
+        # Orthanc IDs are hashes, not patient data, and they match the
+        # resource that carries the 4600/4601 metadata.
+        kind = {ChangeType.STABLE_STUDY: "Study", ChangeType.STABLE_SERIES: "Series",
+                ChangeType.NEW_INSTANCE: "Instance"}.get(self._trigger)
+        try:
+            resource = f"{kind} {self._resource_id(instances_set)}"
+        except Exception:
+            resource = f"Instances set {instances_set.id}"
+        return f"{resource} ({len(instances_set.series_ids)} series / {len(instances_set.instances_ids)} instances)"
 
     def _resource_client(self):
         if self._trigger == ChangeType.STABLE_STUDY:
@@ -493,13 +608,14 @@ class OrthancForwarder:
         return f"{self._terminal_configuration}:{study_last_update}"
 
     def _mark_as_terminal(self, instances_set: InstancesSet):
-        logger.info(f"{instances_set} No eligible destinations matched; keeping source data")
+        logger.info(f"{self._describe(instances_set)} No eligible destinations matched; keeping source data")
         self._resource_client().set_string_metadata(
             self._resource_id(instances_set),
             metadata_name=TERMINAL_METADATA_NAME,
             content=self._terminal_marker(instances_set),
         )
         self._status.pop(instances_set.id, None)
+        self._clear_failure(self._resource_id(instances_set))
 
     def forward(self, instances_set, already_sent_to_destinations: List[str]) -> Tuple[List[str], List[str]]:  # returns (sent destinations, eligible destinations)
         if instances_set.id not in self._status:
@@ -522,7 +638,7 @@ class OrthancForwarder:
                 destination_retry_key = dest.retry_key
                 if destination_retry_key in already_sent_to_destinations:
                     eligible_destinations.append(destination_retry_key)
-                    logger.info(f"{instances_set} Sending ... already sent to {dest.destination} using {dest.forwarder_mode}")
+                    logger.info(f"{self._describe(instances_set)} Sending ... already sent to {dest.destination} using {dest.forwarder_mode}")
                     if self._on_instances_set_forwarded:
                         self._on_instances_set_forwarded(instances_set=instances_set,
                                                          destination=dest.destination)
@@ -544,19 +660,19 @@ class OrthancForwarder:
 
                     if not dest.matches_study_description(study_description):
                         logger.info(
-                            f"{instances_set} Skipping {dest.destination}: "
+                            f"{self._describe(instances_set)} Skipping {dest.destination}: "
                             f"StudyDescription '{study_description or ''}' does not match "
                             f"{dest.study_description_match_type} filter '{dest.study_description_pattern}'"
                         )
                         continue
 
                 eligible_destinations.append(destination_retry_key)
-                logger.info(f"{instances_set} Sending to {dest.destination} using {dest.forwarder_mode}")
+                logger.info(f"{self._describe(instances_set)} Sending to {dest.destination} using {dest.forwarder_mode}")
                 self._forward_to_destination(
                     instances_set=instances_set,
                     destination=dest
                 )
-                logger.info(f"{instances_set} Sent")
+                logger.info(f"{self._describe(instances_set)} Sent to {dest.destination} using {dest.forwarder_mode}")
                 sent_to_destinations.append(destination_retry_key)
                 if instances_set.id in self._status:
                     status = self._status[instances_set.id]
@@ -571,13 +687,13 @@ class OrthancForwarder:
                                                      destination=dest.destination)
 
             except exceptions.OrthancApiException as ex:
-                logger.error(f"{instances_set} Error while forwarding to {dest.destination}: {ex.msg}")
+                logger.error(f"{self._describe(instances_set)} Error while forwarding to {dest.destination}: {ex.msg}")
                 if self._on_instances_set_forward_error:
                     self._on_instances_set_forward_error(instances_set=instances_set,
                                                          destination=dest.destination,
                                                          error=ex.msg)
             except Exception as ex:
-                logger.error(f"{instances_set} Error while forwarding to {dest.destination}: {ex}", exc_info=True)
+                logger.error(f"{self._describe(instances_set)} Error while forwarding to {dest.destination}: {ex}", exc_info=True)
                 if self._on_instances_set_forward_error:
                     self._on_instances_set_forward_error(instances_set=instances_set,
                                                          destination=dest.destination,
@@ -593,17 +709,18 @@ class OrthancForwarder:
 
 
     def delete(self, instances_set):
-        logger.info(f"{instances_set} Deleting ...")
+        logger.info(f"{self._describe(instances_set)} Deleting ...")
         instances_set.delete()
         self._status.pop(instances_set.id, None)
-        logger.info(f"{instances_set} Deleting ... Done")
+        self._clear_failure(self._resource_id(instances_set))
+        logger.info(f"{self._describe(instances_set)} Deleting ... Done")
 
     def handle_instances_set(self, instances_set: InstancesSet):
         if not instances_set.instances_ids:
             return
         if instances_set.id not in self._status:
             if self._is_terminal(instances_set):
-                logger.debug(f"{instances_set} Skipping permanently ineligible content")
+                logger.debug(f"{self._describe(instances_set)} Skipping permanently ineligible content")
                 return
             status = ForwarderInstancesSetStatus()
             self._load_forwarding_status(instances_set, status)
@@ -612,10 +729,10 @@ class OrthancForwarder:
 
         if status.next_retry:  # this is a retry !
             if datetime.datetime.now() < status.next_retry:
-                logger.debug(f"{instances_set} Skipping while waiting for retry")
+                logger.debug(f"{self._describe(instances_set)} Skipping while waiting for retry")
                 return
 
-        logger.info(f"{instances_set} Handling ...")
+        logger.info(f"{self._describe(instances_set)} Handling ...")
 
         # filter
         instances_set = self.filter(instances_set)
@@ -630,7 +747,7 @@ class OrthancForwarder:
                 self._schedule_retry(instances_set, status)
                 return
         else:
-            logger.info(f"{instances_set} Skipping processing that has already been performed")
+            logger.info(f"{self._describe(instances_set)} Skipping processing that has already been performed")
 
         # forward
         sent_to_destinations, eligible_destinations = self.forward(instances_set, status.sent_to_destinations)
@@ -647,7 +764,7 @@ class OrthancForwarder:
             self._schedule_retry(instances_set, status)
             return
 
-        logger.info(f"{instances_set} Handling ... Done")
+        logger.info(f"{self._describe(instances_set)} Handling ... Done")
 
     @staticmethod
     def _job_key(destination, unit):
@@ -701,12 +818,28 @@ class OrthancForwarder:
             if job.info.status == JobStatus.FAILURE:
                 status.pending_jobs.pop(key)
                 self._save_forwarding_status(instances_set, status)
-                raise exceptions.OrthancApiException(f"Forwarding job {job.orthanc_id} failed")
+                raise exceptions.OrthancApiException(
+                    f"Forwarding job {job.orthanc_id} failed: {self._job_failure_details(job.orthanc_id)}"
+                )
             if time.monotonic() >= deadline:
                 # Keep the job receipt so a retry/restart checks this job rather
                 # than starting another send with an uncertain outcome.
                 raise TimeoutError(f"Forwarding job {job.orthanc_id} did not complete before the timeout")
             time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+
+    def _job_failure_details(self, job_id: str) -> str:
+        # The API client's JobInfo drops Orthanc's error fields, and Orthanc
+        # prunes job history (JobsHistorySize), so record the cause in the log.
+        try:
+            job = self._source.jobs.get_json(job_id)
+        except Exception as error:
+            return f"error details unavailable ({error})"
+        description = job.get("ErrorDescription") or "unknown error"
+        details = " ".join(str(job.get("ErrorDetails") or "").split())
+        message = f"{description} (code {job.get('ErrorCode')})"
+        if details:
+            message += f": {details[:500]}"
+        return message
 
     def _forward_to_destination(self, instances_set: InstancesSet, destination: ForwarderDestination):
         if destination.forwarder_mode == ForwarderMode.DICOM:
@@ -890,6 +1023,7 @@ if __name__ == '__main__':
     add_parser_argument_w_alias(parser, '--http_connect_timeout', type=float, default=5, help='HTTP connect timeout in seconds')
     add_parser_argument_w_alias(parser, '--http_read_timeout', type=float, default=15, help='HTTP response timeout in seconds')
     add_parser_argument_w_alias(parser, '--forward_timeout', type=float, default=3600, help='Time to wait for a forwarding job before retrying its status')
+    add_parser_argument_w_alias(parser, '--failure_alert_after', type=float, default=0, help='Report a failing status in HEARTBEAT_FILE once a resource has failed for this many seconds (0 disables)')
     add_parser_argument_w_alias(parser, '--trigger', type=str, default=None, help='NewInstance or StableStudy')
     add_parser_argument_w_alias(parser, '--mode', type=str, default='dicom', help=f'Default forwarder mode. One of: {", ".join(sorted(valid_modes))}')
 
@@ -918,6 +1052,7 @@ if __name__ == '__main__':
     http_connect_timeout = float(os.environ.get("HTTP_CONNECT_TIMEOUT", args.http_connect_timeout))
     http_read_timeout = float(os.environ.get("HTTP_READ_TIMEOUT", args.http_read_timeout))
     forward_timeout = float(os.environ.get("FORWARD_TIMEOUT", args.forward_timeout))
+    failure_alert_after = float(os.environ.get("FAILURE_ALERT_AFTER", args.failure_alert_after))
     trigger = os.environ.get("TRIGGER", args.trigger)
     mode_str = os.environ.get("MODE", args.mode)
 
@@ -947,6 +1082,7 @@ if __name__ == '__main__':
         worker_threads_count=worker_threads_count,
         polling_interval_in_seconds=polling_interval_in_seconds,
         forward_timeout_in_seconds=forward_timeout,
+        failure_alert_after_in_seconds=failure_alert_after,
     )
 
     forwarder.execute()
