@@ -1,3 +1,10 @@
+v 0.23.2 (fork maintenance)
+==========================
+- `OrthancForwarder` writes its delivery status as JSON to `HEARTBEAT_FILE`; `FAILURE_ALERT_AFTER` reports a `failing` status once a resource has failed for that long.
+- A failed study waiting for its retry costs one request per polling pass instead of listing its instances; unexpected errors back off instead of repeating every second.
+- Forwarder logs name the Orthanc resource ID and destination, and failed jobs include Orthanc's error description and details.
+- BREAKING_CHANGE The image is built in stages onto a slim Python 3.14 base and runs as UID 10001; set `user:` for a tool that writes to root-owned mounts.
+
 v 0.23.1 (fork maintenance)
 ==========================
 - Preserve multi-destination forwarding, StudyDescription routing, stable-study processing, and mp-docker workflow tests.

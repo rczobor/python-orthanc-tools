@@ -126,6 +126,28 @@ class TestForwarderIntegration(unittest.TestCase):
         self.assertEqual(1, status.retry_count)
         self.assertEqual({}, status.pending_jobs)
 
+    def test_refused_dicom_send_logs_orthanc_error_and_reports_failing_status(self):
+        # Port 9 inside the source container refuses the association at once.
+        self.source.put("modalities/maintenance-down", json=["DOWN", "127.0.0.1", 9])
+        _, ids, _ = self.upload()
+        forwarder = self.forwarder([ForwarderDestination("maintenance-down", ForwarderMode.DICOM)],
+                                   failure_alert_after_in_seconds=0.5)
+        with tempfile.TemporaryDirectory() as folder:
+            heartbeat = pathlib.Path(folder) / "heartbeat"
+            forwarder._heartbeat_file = str(heartbeat)
+            with patch("orthanc_tools.orthanc_forwarder.HEARTBEAT_INTERVAL_SECONDS", 0):
+                with self.assertLogs("orthanc_tools.orthanc_forwarder", "ERROR") as logs:
+                    forwarder.handle_all_content()
+                time.sleep(0.6)
+                with patch.object(self.source.series, "get_instances_ids",
+                                  wraps=self.source.series.get_instances_ids) as list_instances:
+                    forwarder.handle_all_content()
+            status = json.loads(heartbeat.read_text())
+        self.assertRegex("\n".join(logs.output), r"Forwarding job \S+ failed: .+ \(code \d+\)")
+        list_instances.assert_not_called()
+        self.assertEqual(("failing", 1), (status["status"], status["failing_resources"]))
+        self.assertEqual(ids, self.source.instances.get_all_ids())
+
     def slow_peer(self):
         entered = threading.Event()
         release = threading.Event()

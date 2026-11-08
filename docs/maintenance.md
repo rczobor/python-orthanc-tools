@@ -33,10 +33,25 @@ Both lockfiles pass pip-audit with no known advisories at this review date.
 The finished image was also scanned with Trivy 0.76.2 and its 2026-11-06 database.
 This is **not a clean bill of health for the whole image**: Debian 13 findings,
 including high and critical severities, remain without fixed versions in that
-database. Reducing the full Debian build image to a tested runtime image is a
-separate hardening opportunity. Trivy also reports setuptools 70.3.0 from pip's
+database. Trivy also reports setuptools 70.3.0 from pip's
 vendored metadata; pip contains the `pkg_resources` subset, not the vulnerable
 `wheel.py` or `package_index.py` implementations. Installed setuptools is 84.2.1.
+
+### Slim runtime image: 2026-11-08
+
+The image now builds wheels in the reviewed full `python:3.14` image and installs them into
+`python:3.14-slim` (Python 3.14.10, Debian 13.7) without compilers, setuptools or build tools. It
+runs as UID 10001. Trivy 0.76.2 with its 2026-11-08 database reported these OS package findings:
+
+| Image | Critical | High | Medium | Low | Unknown |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Previous full image | 15 | 273 | 715 | 1302 | 54 |
+| Slim runtime image | 0 | 49 | 75 | 65 | 0 |
+
+The slim base digest predates Debian's `zlib1g` `1:1.3.dfsg+really1.3.1-1+deb13u1` security update
+(CVE-2026-76844, CVE-2026-85091, CVE-2026-27171), which the previous image also lacked. Refresh the
+pinned digest when the upstream slim image picks it up. The remaining Python findings are the same
+setuptools 70.3.0 metadata vendored by pip described above.
 
 Recent CPython advisories also need follow-up when a patched 3.14 image ships:
 [CVE-2026-116566](https://www.cve.org/CVERecord?id=CVE-2026-116566) (embedded NULs
@@ -51,9 +66,12 @@ if deploying with different OpenSSL configuration.
 docker build --build-arg VCS_REF="$(git rev-parse HEAD)" -t python-orthanc-tools:maintenance .
 ```
 
+The Dockerfile mounts the build stage's wheels with `RUN --mount`, which requires BuildKit, the
+default builder since Docker 23.
+
 ## Disposable production-like tests
 
-The maintenance overlay uses pinned Orthanc 26.9.1 and PostgreSQL 17.11, PostgreSQL indexing,
+The maintenance overlay uses the production Orthanc 26.11.0 and PostgreSQL 17.11 digests, PostgreSQL indexing,
 filesystem DICOM storage, source overwrite disabled, and short HTTP keep-alive. It publishes
 no ports and uses project-scoped storage. All credentials and DICOM inputs are synthetic.
 
@@ -104,11 +122,13 @@ retry only after establishing that no send was accepted. If the outcome cannot b
 leave the source and receipt intact for manual recovery. Keep credentials and clinical data out
 of diagnostic exports.
 
-Health checks measure source/API and process responsiveness. A responsive job can remain
-pending while its destination is unavailable; forwarding errors, job age, and retained backlog
-need operational monitoring. Docker restart policies restart exited processes, not merely
-unhealthy containers. HTTP waits are bounded; a source-listing failure exits the CLI without
-stranding workers. An unwritable heartbeat logs an error and leaves health to expire.
+Heartbeat age measures source/API and process responsiveness. Its JSON content reports how many
+resources are failing and the age of the oldest failure; with `FAILURE_ALERT_AFTER`, the
+documented health check reports a destination outage or uncertain submission as an unhealthy
+container. Pending jobs that have not yet timed out are not failures. Docker restart policies
+restart exited processes, not merely unhealthy containers, so an unhealthy forwarder keeps
+retrying until it is repaired. HTTP waits are bounded; a source-listing failure exits the CLI
+without stranding workers. An unwritable heartbeat logs an error and leaves health to expire.
 
 ## Safe backup and worklist replacement
 
