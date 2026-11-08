@@ -66,6 +66,9 @@ if deploying with different OpenSSL configuration.
 docker build --build-arg VCS_REF="$(git rev-parse HEAD)" -t python-orthanc-tools:maintenance .
 ```
 
+The Dockerfile mounts the build stage's wheels with `RUN --mount`, which requires BuildKit, the
+default builder since Docker 23.
+
 ## Disposable production-like tests
 
 The maintenance overlay uses the production Orthanc 26.11.0 and PostgreSQL 17.11 digests, PostgreSQL indexing,

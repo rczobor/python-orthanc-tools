@@ -159,9 +159,11 @@ content reports delivery:
 A resource is failing from its first failed attempt until it is forwarded, becomes ineligible, or
 leaves the source. `status` becomes `failing` once the oldest failure is older than
 `FAILURE_ALERT_AFTER` seconds, so the health check above turns a persistent destination outage or an
-uncertain submission into an unhealthy container. The default `0` never reports `failing`. After a
-destination recovers, the status clears at the resource's next retry, up to 60 minutes later. Failure
-state is kept in memory: restarting the forwarder retries at once but also restarts the alert clock.
+uncertain submission into an unhealthy container. The default `0` never reports `failing`, and the
+status is only written when `HEARTBEAT_FILE` is set. After a destination recovers, the status clears
+once every failing resource succeeds at its next retry, up to 60 minutes later. An uncertain
+submission stays failing until it is reconciled. Failure state is kept in memory: restarting the
+forwarder retries at once but also restarts the alert clock.
 
 The container image runs as the unprivileged UID 10001 on a slim Python base. Its only writes are
 to the heartbeat, so it works with a read-only root filesystem and a tmpfs `/tmp`. Set `user:` when
@@ -178,11 +180,12 @@ the request automatically. See [maintenance and recovery](docs/maintenance.md).
 | `HTTP_CONNECT_TIMEOUT` / `--http-connect-timeout` | 5 seconds | Bound source connection attempts. |
 | `HTTP_READ_TIMEOUT` / `--http-read-timeout` | 15 seconds | Bound each source HTTP response wait. |
 | `FORWARD_TIMEOUT` / `--forward-timeout` | 3600 seconds | Bound one job wait; retries keep checking the existing job. |
-| `FAILURE_ALERT_AFTER` / `--failure-alert-after` | 0 (disabled) | Report a `failing` heartbeat status after this many seconds of failure. |
+| `FAILURE_ALERT_AFTER` / `--failure-alert-after` | 0 (disabled) | Report a `failing` `HEARTBEAT_FILE` status after this many seconds of failure. |
 
 A failed resource retries after 1, 2, 5, 30 and then every 60 minutes. With `StableStudy`, until its
-retry is due each pass reads only the study itself; new instances in the study are handled at once. Log lines name the
-Orthanc resource ID and destination, and a failed job includes Orthanc's error description and
+retry is due, each pass reads only the study itself. After a failed delivery, new instances in the
+study are handled at once; after an unexpected error, the study waits for its retry. Log lines name
+the Orthanc resource ID and destination, and a failed job includes Orthanc's error description and
 details. Orthanc keeps only `JobsHistorySize` finished jobs (default 10), so a forwarder source
 should keep a larger history, for example `"JobsHistorySize": 500`, for investigation.
 
