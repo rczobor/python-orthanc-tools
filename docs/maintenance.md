@@ -11,6 +11,19 @@ tag and its `org.opencontainers.image.revision` label to identify the deployed s
 The Dockerfile pins the Python image digest. Update these pins deliberately, run the regression
 and integration checks below, and audit the resulting runtime before releasing an image.
 
+[Renovate](../renovate.json) proposes these updates on the first of each month (UTC). It opens one
+PR for minor and patch Python package updates, one for base image digests and one for GitHub
+Actions. Major updates, Python image upgrades and pre-1.0 minor releases get their own PRs.
+Packages wait until a release is seven days old; base images do not, because their tags are
+rebuilt too often. Security fixes from OSV skip the schedule and the wait. Pending updates are not
+listed anywhere while repository issues are disabled, because Renovate's dashboard is an issue.
+
+The lockfiles are not generated from `requirements.txt`, so Renovate bumps each pin and its hashes
+without resolving the dependency graph. If an update needs a new or newer transitive package,
+`--require-hashes` or `pip check` fails in CI; add the pin by hand. Compose files are excluded
+because they mirror production Orthanc and PostgreSQL. A merged update reaches production only
+through the rollout below.
+
 ### Dependency review: 2026-11-07
 
 The November refresh updates certifi to 2026.10.23 for the critical
