@@ -422,7 +422,7 @@ invoke==3.0.3 \
 jinxed==2.1.0 \
     --hash=sha256:43b802d18b70e405d410fb66eb2837d1101e7e5ea922e666507bb43f34d11d09 \
     --hash=sha256:7e755b831faa2443d44fb4ce7c0202eb9c3ed39bd5bf1193365888f4f6092b54
-orthanc_api_client==0.25.3 \
+orthanc-api-client==0.25.3 \
     --hash=sha256:75a2e3c01183516785d4e59f58d969c74f32dbe04775d282dc20e5450a675732 \
     --hash=sha256:a9c33b56bc83581c0a4b73cd57c346b2a71e4c3d7835ba0e59e78e83bcd779a3
 paramiko==5.1.0 \

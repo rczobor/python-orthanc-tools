@@ -1,0 +1,53 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "forkProcessing": "enabled",
+  "semanticCommits": "enabled",
+  "schedule": ["* * 1 * *"],
+  "prHourlyLimit": 0,
+  "minimumReleaseAge": "7 days",
+  "osvVulnerabilityAlerts": true,
+  "pip_requirements": {
+    "managerFilePatterns": ["/(^|/)requirements(-build)?\\.lock$/"]
+  },
+  "packageRules": [
+    {
+      "description": "pyproject.toml repeats the build lock's setuptools and wheel pins, so both move in one PR.",
+      "matchManagers": ["pip_requirements", "pep621"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "Python dependencies"
+    },
+    {
+      "description": "Pre-1.0 minor releases may break; review them on their own.",
+      "matchManagers": ["pip_requirements", "pep621"],
+      "matchCurrentVersion": "<1.0.0",
+      "matchUpdateTypes": ["minor"],
+      "groupName": null
+    },
+    {
+      "description": "Python image tags are rebuilt for Debian and CPython fixes more often than a release-age window, which would hold their updates indefinitely or let one build stage move without the other.",
+      "matchManagers": ["dockerfile"],
+      "minimumReleaseAge": null
+    },
+    {
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["digest"],
+      "groupName": "Python base image digests"
+    },
+    {
+      "description": "Both build stages must stay on the same Python release.",
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["major", "minor"],
+      "groupName": "Python base image upgrade"
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": "Compose files mirror production Orthanc/PostgreSQL versions or are demos; change them with a production rollout.",
+      "matchManagers": ["docker-compose"],
+      "enabled": false
+    }
+  ]
+}
