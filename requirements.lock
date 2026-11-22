@@ -475,9 +475,9 @@ runs==1.3.0 \
 schedule==1.2.2 \
     --hash=sha256:15fe9c75fe5fd9b9627f3f19cc0ef1420508f9f9a46f45cd0769ef75ede5f0b7 \
     --hash=sha256:5bef4a2a0183abf44046ae0d164cadcac21b1db011bdd8102e4a0c1e91e06a7d
-StrEnum==0.4.15 \
-    --hash=sha256:878fb5ab705442070e4dd1929bb5e2249511c0bcf2b0eeacf3bcd80875c82eff \
-    --hash=sha256:a30cda4af7cc6b5bf52c8055bc4bf4b2b6b14a93b574626da33df53cf7740659
+StrEnum==0.5.0 \
+    --hash=sha256:9c50a5ce647c0a625ac25c1b719039e745466b6a04bd001aee6376381d8cdce7 \
+    --hash=sha256:f23a35daa03c948885d616463f75ebb0f179cb13acd17c3ac3b2394bfc343967
 urllib3==2.8.0 \
     --hash=sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3 \
     --hash=sha256:63bf2ead4c879426ebf22ef2a781eeb4aa3b4ae798a0435506f8687fd5bb9b63
