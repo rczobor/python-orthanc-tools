@@ -3,7 +3,7 @@
 ## Setup and verification
 
 Use an isolated virtual environment with a Python version in the CI matrix
-(currently 3.11 and 3.14). Install the reviewed runtime and build dependencies:
+(currently 3.11 and 3.15). Install the reviewed runtime and build dependencies:
 
 ```sh
 python3 -m venv .venv

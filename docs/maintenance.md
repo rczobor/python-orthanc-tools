@@ -66,13 +66,23 @@ The slim base digest predates Debian's `zlib1g` `1:1.3.dfsg+really1.3.1-1+deb13u
 pinned digest when the upstream slim image picks it up. The remaining Python findings are the same
 setuptools 70.3.0 metadata vendored by pip described above.
 
-Recent CPython advisories also need follow-up when a patched 3.14 image ships:
+### Python 3.15 runtime: 2026-11-22
+
+Both stages now use `python:3.15` and `python:3.15-slim` (Python 3.15.2, Debian 13.7). Every
+locked package installs from a prebuilt wheel (pure Python, abi3 or cp315), and StrEnum is now 0.5.0, a packaging-only
+release. Python 3.15.2 carries the 3.14.10 security fixes listed above. Both lockfiles pass
+pip-audit. Trivy 0.76.2 with its 2026-11-22 database reports the same OS findings for the 3.14
+and 3.15 slim images: 0 critical, 51 high, 101 medium, 81 low and 7 unknown. Debian has fixes
+for 30 of them, in `libc6` and the `zlib1g` update above, that the slim base has not picked up yet.
+The Python findings are still only the setuptools 70.3.0 metadata vendored by pip.
+
+These CPython advisories still need follow-up when a patched 3.15 image ships:
 [CVE-2026-116566](https://www.cve.org/CVERecord?id=CVE-2026-116566) (embedded NULs
-in `socket.getaddrinfo`) and
+in `socket.getaddrinfo`, fixed only in the unreleased next 3.15 version) and
 [CVE-2026-103995](https://www.cve.org/CVERecord?id=CVE-2026-103995) (lenient HTTP
-framing). The 3.14.10-only FIPS regression
+framing). The FIPS regression
 [CVE-2026-119170](https://www.cve.org/CVERecord?id=CVE-2026-119170) affects OpenSSL
-FIPS mode; that mode was verified disabled in this release image. Reassess this
+FIPS mode, which was verified disabled in the 3.14 and 3.15 images. Reassess this
 if deploying with different OpenSSL configuration.
 
 ```sh

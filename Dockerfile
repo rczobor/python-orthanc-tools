@@ -1,6 +1,6 @@
 # The full image builds wheels, including any locked package that ships only
 # as a source distribution. Its compilers and libraries stay out of the runtime.
-FROM python:3.14@sha256:e5de6bc932256f8138c2353023dc4fd24d010d72f6b5cb06be126f0a4cd53784 AS build
+FROM python:3.15@sha256:46837ed3105db0029b6d656816185c6258e3b39690532fb782428e0a5fd76182 AS build
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -17,11 +17,11 @@ COPY orthanc_tools/ ./orthanc_tools/
 COPY LICENSE.txt MANIFEST.in pyproject.toml README.md setup.cfg setup.py requirements.txt ./
 RUN python -m build --no-isolation --wheel --outdir /wheels/runtime .
 
-FROM python:3.14-slim@sha256:9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
 
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.source="https://github.com/rczobor/python-orthanc-tools" \
-      org.opencontainers.image.version="0.23.2" \
+      org.opencontainers.image.version="0.23.3" \
       org.opencontainers.image.revision="${VCS_REF}"
 
 ENV PYTHONUNBUFFERED=1 \

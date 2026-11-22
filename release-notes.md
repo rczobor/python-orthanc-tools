@@ -1,3 +1,9 @@
+v 0.23.3 (fork maintenance)
+==========================
+- The image runs on Python 3.15 (slim Debian 13 base); CI tests Python 3.11 and 3.15.
+- Removed the unused `six` dependency; the tools use the standard library's `StrEnum`.
+- Package metadata declares the license as `LGPL-3.0-only`.
+
 v 0.23.2 (fork maintenance)
 ==========================
 - `OrthancForwarder` writes its delivery status as JSON to `HEARTBEAT_FILE`; `FAILURE_ALERT_AFTER` reports a `failing` status once a resource has failed for that long.
