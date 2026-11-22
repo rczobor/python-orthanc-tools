@@ -12,7 +12,7 @@ import threading
 import queue
 from collections import Counter
 from pathlib import Path
-from strenum import StrEnum
+from enum import StrEnum
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 

@@ -2,7 +2,7 @@ import argparse
 import logging
 from orthanc_tools.helpers.logging_config import configure_logging
 import os
-from strenum import StrEnum
+from enum import StrEnum
 
 from orthanc_api_client import OrthancApiClient, ResourceType, JobStatus, ResourceNotFound
 from .helpers.scheduler import Scheduler

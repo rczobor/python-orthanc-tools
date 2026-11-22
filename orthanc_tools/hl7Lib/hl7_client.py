@@ -3,7 +3,6 @@ from optparse import OptionParser
 import hl7
 import typing
 import os.path
-import six
 import socket
 import sys
 from .hl7_message_validator import Hl7MessageValidator
