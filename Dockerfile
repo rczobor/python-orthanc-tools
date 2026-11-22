@@ -21,7 +21,7 @@ FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87
 
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.source="https://github.com/rczobor/python-orthanc-tools" \
-      org.opencontainers.image.version="0.23.2" \
+      org.opencontainers.image.version="0.23.3" \
       org.opencontainers.image.revision="${VCS_REF}"
 
 ENV PYTHONUNBUFFERED=1 \

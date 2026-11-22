@@ -5,7 +5,7 @@ here = pathlib.Path(__file__).parent.resolve()
 
 setup(
     name='orthanc_tools',
-    version='0.23.2',
+    version='0.23.3',
     description='Python Orthanc Tools',
     long_description=(here / 'README.md').read_text(encoding='utf-8'),
     long_description_content_type='text/markdown',
@@ -21,6 +21,7 @@ setup(
         'Programming Language :: Python :: 3.12',
         'Programming Language :: Python :: 3.13',
         'Programming Language :: Python :: 3.14',
+        'Programming Language :: Python :: 3.15',
         'Programming Language :: Python :: 3 :: Only',
     ],
     keywords='orthanc, dicom, rest api, hl7',
